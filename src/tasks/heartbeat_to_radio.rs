@@ -1,27 +1,24 @@
-use tokio::net::UdpSocket;
 use tokio::time::{interval, Duration};
-use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use crate::types::{RustStatus, AppState, GLOBAL_TX};
 
-pub fn spawn_radio_heartbeat(target_radio_addr: SocketAddr) {
+pub fn spawn_radio_heartbeat(state: Arc<RwLock<AppState>>) {
     tokio::spawn(async move {
-        let hb_socket = match UdpSocket::bind("0.0.0.0:0").await {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("[任务0] 心跳 UDP 绑定失败: {}", e);
-                return;
-            }
-        };
-
         let mut hb_interval = interval(Duration::from_secs(10));
-        let hb_packet = vec![0xE3, 0x2D, 0x01, 0x01];
         println!("[任务0] 心跳任务启动，频率: 10s/次");
 
         loop {
             hb_interval.tick().await;
-            if let Err(e) = hb_socket.send_to(&hb_packet, target_radio_addr).await {
-                crate::utils::log_to_pc(&format!("心跳包发送失败: {}", e));
+            
+            let target_ip = {
+                let s = state.read().unwrap();
+                s.radio_ip.clone()
+            };
+
+            if let Some(ip) = target_ip {
+                if let Err(e) = crate::radio_ctrl::query_status(&ip) {
+                    crate::utils::log_to_pc(&format!("⚠️ 心跳包下发失败: {}", e));
+                }
             }
         }
     });

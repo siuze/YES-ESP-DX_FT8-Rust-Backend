@@ -1,82 +1,84 @@
 use tokio::time::{interval, Duration};
-use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
-use std::ffi::CString;
 use chrono::{Utc, Timelike};
 
 use crate::types::{AppState, STATE, AUTO_MGR};
 use crate::utils::log_to_pc;
-use crate::ft8_codec::encode_ft8_symbols;
-use crate::config;
-use crate::ft8_qso::qso_auto_hunter::AutoQsoManager;
 
+/// 任务 F1: 发射链路定时检查
+/// 每隔一定频率检查是否进入了预先设定的发射窗口 (0/15/30/45s)。
 pub fn spawn_tx_check_task(state: Arc<RwLock<AppState>>) {
-    let udp_tx = Arc::new(std::net::UdpSocket::bind("0.0.0.0:0").unwrap());
-    let target_radio_addr: SocketAddr = config::RADIO_ADDR.parse().unwrap();
-
     tokio::spawn(async move {
-        let mut ticker = interval(Duration::from_millis(10));
+        let mut ticker = interval(Duration::from_millis(100));
         loop {
             ticker.tick().await;
             let now = Utc::now();
             let sec = now.second();
 
-            if (sec == 0 || sec == 15 || sec == 30 || sec == 45) && now.timestamp_subsec_millis() < 900 {
-                let tx_info = {
-                    let s = state.read().unwrap();
+            // 仅在窗口起始的 1 秒内尝试触发发射，防止重复发送
+            if (sec == 0 || sec == 15 || sec == 30 || sec == 45) && now.timestamp_subsec_millis() < 500 {
+                let mut should_sleep = false;
+
+                {
+                    let mut s = state.write().unwrap();
+                    
+                    // 1. 获取发射参数
                     let is_even_win = sec == 0 || sec == 30;
-                    if s.status.auto_tx_mode > 0 && (s.status.tx_window_even == 1) == is_even_win {
+                    let (pending_msg, mode, max_rep) = {
                         let msg = String::from_utf8_lossy(&s.status.pending_msg).trim_matches(char::from(0)).to_string();
-                        if !msg.is_empty() {
-                            let use_f = if s.status.auto_tx_mode == 3 && s.status.repeat_count >= 2 && !msg.starts_with("CQ ") {
+                        (msg, s.status.auto_tx_mode, s.status.max_repeats)
+                    };
+
+                    // 判断是否满足发射条件：处于自动发射模式，且窗口匹配
+                    if mode > 0 && !pending_msg.is_empty() && (s.status.tx_window_even == 1) == is_even_win {
+                        // 2. 确定发射 IP
+                        if let Some(target_ip) = s.radio_ip.clone() {
+                            // 3. 确定最终频偏 (Homing 策略)
+                            let use_f = if mode == 3 && s.status.repeat_count >= 2 && !pending_msg.starts_with("CQ ") {
                                 s.target_offset
                             } else {
                                 s.status.pending_offset
                             };
-                            Some((msg, use_f, s.status.auto_tx_mode, s.status.max_repeats))
-                        } else { None }
-                    } else { None }
-                };
 
-                if let Some((msg, offset, mode, max_rep)) = tx_info {
-                    let mut tones = [0i32; 79];
-                    let c_msg = CString::new(msg.clone()).unwrap();
-                    unsafe { encode_ft8_symbols(c_msg.as_ptr(), tones.as_mut_ptr()); }
+                            // 4. 下发发射指令
+                            match crate::radio_ctrl::send_ft8_transmit(&target_ip, &pending_msg, use_f) {
+                                Ok(_) => {
+                                    log_to_pc(&format!("🚀 [发射指令已下发] Msg: {} | Freq: {} Hz | IP: {}", pending_msg, use_f, target_ip));
+                                    
+                                    // 更新统计
+                                    s.status.tx_count += 1;
+                                    s.status.repeat_count += 1;
 
-                    let mut pkt = Vec::with_capacity(109);
-                    pkt.extend_from_slice(&0x2DE3u16.to_le_bytes()); // MAGIC
-                    pkt.push(0x01); // VER
-                    pkt.push(28); // Type: TX Data
-                    pkt.extend_from_slice(&offset.to_le_bytes());
-
-                    for t in tones { pkt.push(t as u8); }
-                    let msg_bytes = msg.as_bytes();
-                    let text_len = msg_bytes.len().min(24);
-                    pkt.extend_from_slice(&msg_bytes[..text_len]);
-
-                    for word in msg.split_whitespace() { crate::ft8_codec::save_hash_call(word); }
-                    let _ = udp_tx.send_to(&pkt, target_radio_addr);
-
-                    {
-                        let mut s = state.write().unwrap();
-                        s.status.tx_count += 1;
-                        if s.status.pending_msg == s.status.last_msg { s.status.repeat_count += 1; }
-                        else { 
-                            s.status.repeat_count = 1; 
-                            s.status.last_msg = s.status.pending_msg;
+                                    // 如果是单次模式 (Mode 1 或 2)，判定是否需要结束
+                                    if mode == 1 || (mode == 2 && (s.status.repeat_count >= max_rep || pending_msg.contains(" 73"))) {
+                                        if pending_msg.contains(" 73") || s.status.repeat_count >= max_rep {
+                                            s.status.auto_tx_mode = 0;
+                                            s.status.pending_msg = [0u8; 24]; // 清空
+                                            log_to_pc("🏁 单次任务已完成，回复空闲模式。");
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    log_to_pc(&format!("❌ [发射失败] UDP 写入错误: {}", e));
+                                }
+                            }
+                        } else {
+                            log_to_pc("⚠️ [发射阻塞] 未发现电台 IP，请检查连接或等待自动发现。");
                         }
-                        if mode == 1 || (mode == 2 && (s.status.repeat_count >= max_rep || msg.contains(" 73"))) {
-                            s.status.auto_tx_mode = 0;
-                        }
+                        should_sleep = true;
                     }
-                    log_to_pc(&format!("🚀 已下发发射命令: {} (带回显文本)", msg));
                 }
-                tokio::time::sleep(Duration::from_millis(910)).await;
+
+                if should_sleep {
+                    tokio::time::sleep(Duration::from_millis(600)).await;
+                }
             }
         }
     });
 }
 
+/// 任务 F2: 自动通联管理器状态机心跳 (Mode 3)
+/// 每 100ms 检查一次当前通联进度，决定是否需要切换消息、转入重试或开启下一轮。
 pub fn spawn_auto_qso_timer_task() {
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_millis(100));
@@ -95,20 +97,27 @@ pub fn spawn_auto_qso_timer_task() {
             let mut should_sleep = false;
 
             {
-                let mut mgr = AUTO_MGR.get().unwrap().lock().unwrap();
-                let mgr: &mut AutoQsoManager = &mut *mgr;
+                let mut mgr_locked = AUTO_MGR.get().unwrap().lock().unwrap();
+                let mgr = &mut *mgr_locked;
+                
                 let is_73 = current_msg.contains(" 73") || current_msg.contains(" RR73");
                 let is_cq = current_msg.starts_with("CQ ");
                 let is_chase = !is_73 && !is_cq;
-                let limit_reached = if is_73 { repeat_count >= 1 } else if is_chase { repeat_count >= 3 } else { repeat_count >= 4 };
+                
+                // 判定当前重复次数是否达到上限
+                let limit_reached = if is_73 { repeat_count >= 1 } 
+                                   else if is_chase { repeat_count >= 3 } 
+                                   else { repeat_count >= 4 }; // CQ 重复 4 次
 
                 if !is_idle && limit_reached {
                     if is_chase { mgr.report_failure(); }
+                    
                     let state_arc = STATE.get().unwrap();
                     let mut s = state_arc.write().unwrap();
+                    
                     if mgr.consecutive_failures < 2 {
+                        // 尝试从任务队列拉取下一个任务
                         if let Some((next_m, next_f, target_f, next_e)) = mgr.task_queue.pop_front() {
-                            let next_m: String = next_m;
                             let bytes = next_m.as_bytes();
                             s.status.pending_msg = [0u8; 24];
                             let len = bytes.len().min(24);
@@ -117,22 +126,22 @@ pub fn spawn_auto_qso_timer_task() {
                             s.target_offset = target_f as u16;
                             s.status.tx_window_even = if next_e { 1 } else { 0 };
                             s.status.repeat_count = 0;
-                            log_to_pc(&format!("⏭️ 自动切换下一条: {}", next_m));
+                            log_to_pc(&format!("⏭️ 自动切换任务队列: {}", next_m));
                         } else {
                             s.status.pending_msg = [0u8; 24];
                             log_to_pc("⏭️ 已达发送上限，清空待发射消息");
                         }
                     } else {
                         s.status.pending_msg = [0u8; 24];
-                        log_to_pc("⏭️ 已达连续失败阈值，清空当前任务，准备触发紧急 CQ");
+                        log_to_pc("⏭️ 连续失败，清空任务准备开启紧急 CQ 策略");
                     }
                 }
 
+                // 在每 15 秒周期的结尾 (14, 29, 44, 59s) 检查是否需要发起新的自动 CQ 或追踪
                 if (sec == 14 || sec == 29 || sec == 44 || sec == 59) && ms >= 900 {
                     let current_is_idle = STATE.get().unwrap().read().unwrap().status.pending_msg[0] == 0;
                     if let Some((msg, f, e)) = mgr.check_auto_cq(current_is_idle) {
                         let mut s = STATE.get().unwrap().write().unwrap();
-                        let msg: String = msg;
                         let bytes = msg.as_bytes();
                         s.status.pending_msg = [0u8; 24];
                         let len = bytes.len().min(24);
@@ -141,10 +150,9 @@ pub fn spawn_auto_qso_timer_task() {
                         s.target_offset = f as u16;
                         s.status.tx_window_even = if e { 1 } else { 0 };
                         s.status.repeat_count = 0;
-                        log_to_pc(&format!("🎯 策略触发: {}", msg));
-                    } else if let Some((msg, f, target_f, e)) = mgr.check_auto_chase(is_idle) {
+                        log_to_pc(&format!("🎯 策略触发 (CQ): {}", msg));
+                    } else if let Some((msg, f, target_f, e)) = mgr.check_auto_chase(current_is_idle) {
                         let mut s = STATE.get().unwrap().write().unwrap();
-                        let msg: String = msg;
                         let bytes = msg.as_bytes();
                         s.status.pending_msg = [0u8; 24];
                         let len = bytes.len().min(24);
@@ -153,7 +161,7 @@ pub fn spawn_auto_qso_timer_task() {
                         s.target_offset = target_f as u16;
                         s.status.tx_window_even = if e { 1 } else { 0 };
                         s.status.repeat_count = 0;
-                        log_to_pc(&format!("🎯 策略触发: {}", msg));
+                        log_to_pc(&format!("🎯 策略触发 (Chase): {}", msg));
                     }
                     should_sleep = true;
                 }

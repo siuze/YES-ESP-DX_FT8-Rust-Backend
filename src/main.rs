@@ -13,9 +13,9 @@ pub mod ft8_qso;      // 自动通联业务大类 (包含 auto_qso, notion_logge
 pub mod dsp;          // 数字信号处理核心逻辑
 pub mod tasks;        // 具体的后台常驻异步任务
 pub mod ws_server;    // WebSocket 服务器及指令下发协议
+pub mod radio_ctrl;    // 电台 UDP 协议控制模块
 
 use std::sync::{Arc, Mutex, RwLock};
-use std::net::SocketAddr;
 use axum::{Router, routing::get};
 use tokio::sync::broadcast;
 
@@ -41,12 +41,14 @@ async fn main() {
     GLOBAL_TX.set(tx.clone()).ok();
 
     // --- 3. 初始化全局 AppState (保存电台参数与后端实时状态) ---
+    let initial_ip = if crate::config::RADIO_ADDR.is_empty() { None } else { Some(crate::config::RADIO_ADDR.to_string()) };
     let state = Arc::new(RwLock::new(AppState {
         status: unsafe { std::mem::zeroed() },
         start_time: std::time::Instant::now(),
         current_if_hz: 12000,
         expect_regex_compiled: None,
         target_offset: 1000,
+        radio_ip: initial_ip,
     }));
     {
         let mut s = state.write().unwrap();
@@ -75,10 +77,9 @@ async fn main() {
     });
 
     // --- 6. 挂载所有后台长周期任务 ---
-    let radio_addr: SocketAddr = crate::config::RADIO_ADDR.parse().unwrap();
     
-    // [任务A] 电台 UDP 心跳：维持与电台的连接活性
-    spawn_radio_heartbeat(radio_addr);
+    // [任务A] 电台 UDP 心跳：维持与电台的连接活性 (需要动态感知 IP)
+    spawn_radio_heartbeat(state.clone());
     
     // [任务B] 后端状态上报：向前端同步当前的 CPU 负载、解码统计等
     spawn_status_heartbeat(state.clone());

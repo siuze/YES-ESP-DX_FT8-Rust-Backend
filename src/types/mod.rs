@@ -53,6 +53,7 @@ pub struct AppState {
     pub current_if_hz: u32,
     pub expect_regex_compiled: Option<Regex>,
     pub target_offset: u16,
+    pub radio_ip: Option<String>,
 }
 
 #[repr(C, packed)]

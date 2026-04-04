@@ -34,13 +34,24 @@ async fn handle_socket(socket: WebSocket, state: Arc<RwLock<AppState>>) {
     let state_ctrl = state.clone();
     let mut t2 = tokio::spawn(async move {
         let udp_cmd = UdpSocket::bind("0.0.0.0:0").await.unwrap();
-        let target_radio: SocketAddr = config::RADIO_ADDR.parse().unwrap();
 
         while let Some(Ok(Message::Binary(bin))) = receiver.next().await {
             if bin.is_empty() { continue; }
             match bin[0] {
                 0x02 => {
-                    let _ = udp_cmd.send_to(&bin[1..], target_radio).await;
+                    // 动态获取电台 IP 并发送原始指令包
+                    let radio_ip = {
+                        let s = state_ctrl.read().unwrap();
+                        s.radio_ip.clone()
+                    };
+                    
+                    if let Some(ip) = radio_ip {
+                        if let Ok(target_addr) = format!("{}:{}", ip, crate::radio_ctrl::RADIO_CTRL_PORT).parse::<SocketAddr>() {
+                            let _ = udp_cmd.send_to(&bin[1..], target_addr).await;
+                        }
+                    } else {
+                        log_to_pc("⚠️ [WS] 无法发送指令：尚未发现电台 IP");
+                    }
                 }
                 0x10 => {
                     let cmd_type = bin[1];
