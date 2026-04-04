@@ -104,64 +104,78 @@ pub fn spawn_auto_qso_timer_task() {
                 let is_cq = current_msg.starts_with("CQ ");
                 let is_chase = !is_73 && !is_cq;
                 
-                // 判定当前重复次数是否达到上限
+                // 判定当前重复次数是否达到上限，或者是否有其他更高优先级的回复排队中
+                let has_others = !mgr.task_queue.is_empty();
                 let limit_reached = if is_73 { repeat_count >= 1 } 
+                                   else if has_others && repeat_count >= 2 { true } // 若有新任务排队且当前已重复2次，优先切走
                                    else if is_chase { repeat_count >= 3 } 
                                    else { repeat_count >= 4 }; // CQ 重复 4 次
 
-                if !is_idle && limit_reached {
-                    if is_chase { mgr.report_failure(); }
+                // 核心逻辑 A: 判定当前任务是否结束 (超时/达成/手动清空) 并尝试拉取新任务
+                if (!is_idle && limit_reached) || (is_idle && !mgr.task_queue.is_empty()) {
+                    if !is_idle && limit_reached && is_chase { mgr.report_failure(); }
                     
                     let state_arc = STATE.get().unwrap();
                     let mut s = state_arc.write().unwrap();
                     
-                    if mgr.consecutive_failures < 2 {
-                        // 尝试从任务队列拉取下一个任务
-                        if let Some((next_m, next_f, target_f, next_e)) = mgr.task_queue.pop_front() {
-                            let bytes = next_m.as_bytes();
-                            s.status.pending_msg = [0u8; 24];
-                            let len = bytes.len().min(24);
-                            s.status.pending_msg[..len].copy_from_slice(&bytes[..len]);
-                            s.status.pending_offset = next_f as u16;
-                            s.target_offset = target_f as u16;
-                            s.status.tx_window_even = if next_e { 1 } else { 0 };
-                            s.status.repeat_count = 0;
-                            log_to_pc(&format!("⏭️ 自动切换任务队列: {}", next_m));
-                        } else {
-                            s.status.pending_msg = [0u8; 24];
-                            log_to_pc("⏭️ 已达发送上限，清空待发射消息");
-                        }
+                    // 只要队列中有任务，就必须优先清空队列
+                    if let Some((next_m, next_f, target_f, next_e)) = mgr.task_queue.pop_front() {
+                        let bytes = next_m.as_bytes();
+                        s.status.pending_msg = [0u8; 24];
+                        let len = bytes.len().min(24);
+                        s.status.pending_msg[..len].copy_from_slice(&bytes[..len]);
+                        s.status.pending_offset = next_f as u16;
+                        s.target_offset = target_f as u16;
+                        s.status.tx_window_even = if next_e { 1 } else { 0 };
+                        s.status.repeat_count = 0;
+                        log_to_pc(&format!("⏭️ 自动切换任务队列: {}", next_m));
                     } else {
                         s.status.pending_msg = [0u8; 24];
-                        log_to_pc("⏭️ 连续失败，清空任务准备开启紧急 CQ 策略");
+                        if mgr.consecutive_failures >= 2 {
+                            log_to_pc("⏭️ 队列已清空，检测到连续失败，准备开启紧急 CQ 或策略刷新");
+                        } else {
+                            log_to_pc("⏭️ 队列已清空，任务完成回到空闲状态");
+                        }
                     }
                 }
 
-                // 在每 15 秒周期的结尾 (14, 29, 44, 59s) 检查是否需要发起新的自动 CQ 或追踪
+                // 核心逻辑 B: 在每 15 秒周期的结尾 (14, 29, 44, 59s) 检查是否需要发起新的自动策略
                 if (sec == 14 || sec == 29 || sec == 44 || sec == 59) && ms >= 900 {
                     let current_is_idle = STATE.get().unwrap().read().unwrap().status.pending_msg[0] == 0;
-                    if let Some((msg, f, e)) = mgr.check_auto_cq(current_is_idle) {
-                        let mut s = STATE.get().unwrap().write().unwrap();
-                        let bytes = msg.as_bytes();
-                        s.status.pending_msg = [0u8; 24];
-                        let len = bytes.len().min(24);
-                        s.status.pending_msg[..len].copy_from_slice(&bytes[..len]);
-                        s.status.pending_offset = f as u16;
-                        s.target_offset = f as u16;
-                        s.status.tx_window_even = if e { 1 } else { 0 };
-                        s.status.repeat_count = 0;
-                        log_to_pc(&format!("🎯 策略触发 (CQ): {}", msg));
-                    } else if let Some((msg, f, target_f, e)) = mgr.check_auto_chase(current_is_idle) {
-                        let mut s = STATE.get().unwrap().write().unwrap();
-                        let bytes = msg.as_bytes();
-                        s.status.pending_msg = [0u8; 24];
-                        let len = bytes.len().min(24);
-                        s.status.pending_msg[..len].copy_from_slice(&bytes[..len]);
-                        s.status.pending_offset = f as u16;
-                        s.target_offset = target_f as u16;
-                        s.status.tx_window_even = if e { 1 } else { 0 };
-                        s.status.repeat_count = 0;
-                        log_to_pc(&format!("🎯 策略触发 (Chase): {}", msg));
+                    
+                    let mut triggered = false;
+
+                    // 优先级 1: 只有在队列为空的情况下，尝试发起主动 CQ
+                    if mgr.task_queue.is_empty() {
+                        if let Some((msg, f, e)) = mgr.check_auto_cq(current_is_idle) {
+                            let mut s = STATE.get().unwrap().write().unwrap();
+                            let bytes = msg.as_bytes();
+                            s.status.pending_msg = [0u8; 24];
+                            let len = bytes.len().min(24);
+                            s.status.pending_msg[..len].copy_from_slice(&bytes[..len]);
+                            s.status.pending_offset = f as u16;
+                            s.target_offset = f as u16;
+                            s.status.tx_window_even = if e { 1 } else { 0 };
+                            s.status.repeat_count = 0;
+                            log_to_pc(&format!("🎯 策略触发 (CQ): {}", msg));
+                            triggered = true;
+                        }
+                    } 
+                    
+                    // 优先级 2: 如果当前空闲且没有触发 CQ，则检查是否有优质的追逐目标 (Chase)
+                    if !triggered {
+                        if let Some((msg, f, target_f, e)) = mgr.check_auto_chase(current_is_idle) {
+                            let mut s = STATE.get().unwrap().write().unwrap();
+                            let bytes = msg.as_bytes();
+                            s.status.pending_msg = [0u8; 24];
+                            let len = bytes.len().min(24);
+                            s.status.pending_msg[..len].copy_from_slice(&bytes[..len]);
+                            s.status.pending_offset = f as u16;
+                            s.target_offset = target_f as u16;
+                            s.status.tx_window_even = if e { 1 } else { 0 };
+                            s.status.repeat_count = 0;
+                            log_to_pc(&format!("🎯 策略触发 (Chase): {}", msg));
+                        }
                     }
                     should_sleep = true;
                 }

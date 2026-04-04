@@ -447,12 +447,20 @@ impl AutoQsoManager {
         let tx_is_even = !is_even;
         let now = Instant::now();
         
-        // 5.0 噪音时效性检查 (防止在无法监测底噪的情况下盲目发射导致干扰)
+        // 5.0 噪音时效性检查 (防止长期发射导致无法监测底噪时造成频段干扰)
         let last_update = if tx_is_even { self.last_update_even } else { self.last_update_odd };
         if now.duration_since(last_update) > Duration::from_secs(120) {
-            log_to_pc("⚠️ 活跃通联中断：底噪数据已过期 (>120s)，为避让繁忙频率已停止自动回复。");
-            s.status.pending_msg = [0u8; 24];
-            return;
+            // 优先级策略：底噪过期时，绝不掐断正在进行的通联（包含 SNR 情况）。
+            // 初始呼叫的特征：包含我的网格，且不含 SNR 数值 (+/-) 或通联进度标识 (RRR, RR73, 73)
+            let is_initial_call = next_tx.contains(config::MY_GRID) 
+                && !next_tx.contains('+') && !next_tx.contains('-') 
+                && !next_tx.contains("RRR") && !next_tx.contains("RR73") && !next_tx.contains(" 73");
+
+            if is_initial_call || next_tx.starts_with("CQ ") {
+                log_to_pc(&format!("⚠️ 避让：底噪数据已过期 (>120s)，为避让繁忙频率已拦截主动呼叫。Msg: [{}]", next_tx));
+                s.status.pending_msg = [0u8; 24];
+                return;
+            }
         }
 
         let bytes = next_tx.as_bytes();
