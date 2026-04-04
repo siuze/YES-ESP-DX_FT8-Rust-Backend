@@ -120,3 +120,23 @@ pub fn is_grid(s: &str) -> bool {
     b[0].is_ascii_alphabetic() && b[1].is_ascii_alphabetic() &&
     b[2].is_ascii_digit() && b[3].is_ascii_digit()
 }
+
+/// 提取消息中的发送方呼号
+pub fn get_sender_call(text: &str) -> Option<String> {
+    let parts: Vec<&str> = text.split_whitespace().collect();
+    if parts.len() < 2 { return None; }
+    
+    let to = parts[0].replace(['>', '<'], "");
+    if to == "CQ" {
+        if parts.len() >= 3 {
+             let caller = parts[2].replace(['>', '<'], "");
+             if caller.len() >= 3 { return Some(caller); }
+             let caller2 = parts[1].replace(['>', '<'], "");
+             if caller2.len() >= 3 { return Some(caller2); }
+        }
+    } else {
+        let caller = parts[1].replace(['>', '<'], "");
+        if caller.len() >= 3 { return Some(caller); }
+    }
+    None
+}

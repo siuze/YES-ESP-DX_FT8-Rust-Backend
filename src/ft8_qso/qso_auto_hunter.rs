@@ -77,6 +77,10 @@ pub struct AutoQsoManager {
     pub last_update_odd: Instant,      // 奇数窗口噪声数据更新时间
     
     pub consecutive_failures: u32,     // 连续尝试失败次数 (触发紧急策略)
+    
+    // --- 持久化策略优化 (减少磁盘 IO) ---
+    last_save_time: Instant,           // 上次存档时间
+    is_dirty: bool,                    // 是否有未存档的变更
 }
 
 impl AutoQsoManager {
@@ -115,14 +119,28 @@ impl AutoQsoManager {
             last_update_even: Instant::now() - Duration::from_secs(9999),
             last_update_odd: Instant::now() - Duration::from_secs(9999),
             consecutive_failures: 0,
+            last_save_time: Instant::now(),
+            is_dirty: false,
         }
     }
 
-    /// 持久化状态至本地磁盘
-    fn save_history(&self) {
+    /// 执行存档逻辑 (带节流保护)
+    /// force: 是否跳过 5 分钟的时间间隔强制写入 (如在 QSO 成功后)
+    pub fn maybe_save(&mut self, force: bool) {
+        if !self.is_dirty && !force { return; }
+        
+        let now = Instant::now();
+        if !force && now.duration_since(self.last_save_time) < Duration::from_secs(300) {
+            return; // 未达到 5 分钟存档间隔
+        }
+
         if let Ok(j) = serde_json::to_string(&self.successful_calls) { let _ = fs::write(SUCCESSFUL_FILE, j); }
         if let Ok(j) = serde_json::to_string(&self.successful_grids) { let _ = fs::write(GRIDS_FILE, j); }
         if let Ok(j) = serde_json::to_string(&self.call_to_grid) { let _ = fs::write(CALL_GRID_FILE, j); }
+        
+        self.last_save_time = now;
+        self.is_dirty = false;
+        log_to_pc("💾 自动存档完成：呼号、网格与历史记录已持久化。");
     }
 
     /// 接收最新解码结果并更新状态池
@@ -136,6 +154,7 @@ impl AutoQsoManager {
                 // 如果解码到了地理网格，加入映射表
                 if res.snr != 99 && call != "Unknown" && grid != "RR73" && grid != "RRR" && grid != "73"{
                     self.call_to_grid.insert(call, grid.clone());
+                    self.is_dirty = true; // 标记有新数据需要存档
                 }
             }
         }
@@ -210,7 +229,9 @@ impl AutoQsoManager {
         };
         let tx = self.notion_tx.clone();
         tokio::spawn(async move { let _ = tx.send(log).await; });
-        self.save_history();
+
+        self.is_dirty = true;
+        self.maybe_save(true); // 通联成功后强制立即存档一次
     }
     
     pub fn report_failure(&mut self) { self.consecutive_failures += 1; log_to_pc(&format!("❌ 目标未回复 (当前连续失败: {})", self.consecutive_failures)); }
@@ -356,5 +377,109 @@ impl AutoQsoManager {
             let p1 = grid_to_lat_lon(config::MY_GRID_DETAIL)?; let p2 = grid_to_lat_lon(tg)?;
             Some(calculate_distance(p1.0, p1.1, p2.0, p2.1))
         })
+    }
+
+    /// --- 活跃通联响应逻辑 (Mode 3 专用) ---
+    /// 当处于持续通联模式时，处理针对我的回复消息，并推动状态机向前演进。
+    pub fn handle_auto_qso_logic(&mut self, decoded_msg_raw: &str, snr: i32, freq: f32, dt: f32) {
+        let state_arc = STATE.get().unwrap();
+        let mut s = state_arc.write().unwrap();
+
+        // 1. 模式检查：仅处理模式 3 (持续自动通联)
+        if s.status.auto_tx_mode != 3 {
+            return;
+        }
+
+        // 2. 清洗并格式化消息
+        let decoded_msg = decoded_msg_raw.trim().to_uppercase();
+        if decoded_msg.is_empty() { return; }
+        
+        // 3. 正则匹配检查 (防止干扰和误触发)
+        let is_match = if let Some(re) = &s.expect_regex_compiled {
+            re.is_match(&decoded_msg)
+        } else {
+            // 如果正则还没设置或丢失，且当前正在发的是针对特定人的回复（非 CQ），
+            // 则尝试从字节流恢复，如果还是空，则在 Mode 3 下允许对准包含我呼号的消息
+            let current_re_str = String::from_utf8_lossy(&s.status.expect_regex).trim_matches(char::from(0)).to_string();
+            if !current_re_str.is_empty() {
+                if let Ok(re) = regex::Regex::new(&current_re_str) {
+                    let m = re.is_match(&decoded_msg);
+                    s.expect_regex_compiled = Some(re);
+                    m
+                } else { false }
+            } else {
+                decoded_msg.contains(config::MY_CALL)
+            }
+        };
+
+        // 3.1 核心修复：多目标排队逻辑 (从备份版本找回)
+        // 如果消息是发给我的，但不匹配当前的正则（说明是另外一个人在叫我），将其存入等待队列
+        if !is_match && decoded_msg.contains(config::MY_CALL) {
+            if let Some(target_call) = crate::ft8_qso::qso_utils::get_sender_call(&decoded_msg) {
+                if !self.task_queue.iter().any(|(m, _, _, _)| m.contains(&target_call)) {
+                    let next_tx = crate::ft8_qso::qso_utils::get_next_tx_msg(&decoded_msg, config::MY_CALL, config::MY_GRID, snr);
+                    if !next_tx.is_empty() {
+                        let tx_is_even = !((dt.round() as i32 % 30) == 0);
+                        self.task_queue.push_back((next_tx, self.find_quiet_freq(tx_is_even), freq as i16, tx_is_even));
+                        log_to_pc(&format!("⏳ 发现新请求，已加入任务队列: {}", target_call));
+                    }
+                }
+            }
+            return;
+        }
+
+        if !is_match { return; }
+
+        // 4. 生成下一条消息
+        let next_tx = crate::ft8_qso::qso_utils::get_next_tx_msg(&decoded_msg, config::MY_CALL, config::MY_GRID, snr);
+        if next_tx.is_empty() {
+             log_to_pc("🛑 当前通联已结束 (收到73)，清理缓存等待下一轮采样。");
+             s.status.pending_msg = [0u8; 24]; // [关键修复]
+             s.status.expect_regex = [0u8; 48];
+             s.expect_regex_compiled = None;
+             return;
+        }
+
+        log_to_pc(&format!("🎯 Mode 3 匹配成功 [%{}] -> 下一条: [{}]", decoded_msg, next_tx));
+        
+        // 5. 更新全局状态，触发发射
+        let is_even = (dt.round() as i32 % 30) == 0;
+        let tx_is_even = !is_even;
+        let now = Instant::now();
+        
+        // 5.0 噪音时效性检查 (防止在无法监测底噪的情况下盲目发射导致干扰)
+        let last_update = if tx_is_even { self.last_update_even } else { self.last_update_odd };
+        if now.duration_since(last_update) > Duration::from_secs(120) {
+            log_to_pc("⚠️ 活跃通联中断：底噪数据已过期 (>120s)，为避让繁忙频率已停止自动回复。");
+            s.status.pending_msg = [0u8; 24];
+            return;
+        }
+
+        let bytes = next_tx.as_bytes();
+        let len = bytes.len().min(24);
+        s.status.pending_msg = [0u8; 24];
+        s.status.pending_msg[..len].copy_from_slice(&bytes[..len]);
+        s.status.repeat_count = 0; // 重置重复计数
+        self.report_any_reply(); // 重置连续失败计数
+        
+        // 5.1 频率与窗口同步策略：优先寻找寂静频率 (Split 模式)
+        // pending_offset 为我们的发射频率 (Quiet), target_offset 为目标的频率 (用于重试落地方案)
+        let quiet_f = self.find_quiet_freq(tx_is_even);
+        s.status.pending_offset = quiet_f as u16;
+        s.target_offset = freq as u16;
+        s.status.tx_window_even = if tx_is_even { 1 } else { 0 };
+
+        // 6. 更新下一波期望的正则
+        let next_re_str = crate::ft8_qso::qso_utils::get_next_expect_regex(&next_tx, config::MY_CALL);
+        if !next_re_str.is_empty() {
+            let re_bytes = next_re_str.as_bytes();
+            s.status.expect_regex = [0u8; 48];
+            let re_len = re_bytes.len().min(48);
+            s.status.expect_regex[..re_len].copy_from_slice(&re_bytes[..re_len]);
+            s.expect_regex_compiled = regex::Regex::new(&next_re_str).ok();
+        } else {
+            s.status.expect_regex = [0u8; 48];
+            s.expect_regex_compiled = None;
+        }
     }
 }

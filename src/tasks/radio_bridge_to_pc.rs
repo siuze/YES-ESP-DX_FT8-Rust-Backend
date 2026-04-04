@@ -58,6 +58,11 @@ pub fn extract_radio_info(data: &[u8]) {
 
         if text.is_empty() { return; }
 
+        // 记录发射消息至日志文件
+        if text.contains(crate::config::MY_CALL) {
+            crate::utils::log_qso_activity(true, &text);
+        }
+
         let parts: Vec<&str> = text.split_whitespace().collect();
         let (receiver, sender) = if parts.len() >= 2 {
             (Some(parts[0].to_string()), Some(parts[1].to_string()))
