@@ -1,0 +1,78 @@
+// ============================================================================
+// config.rs.example —— 配置文件模板
+// ============================================================================
+// 使用方法：
+//   1. 将本文件复制为 src/config.rs
+//   2. 按照注释填入你自己的信息
+//   3. 确认 src/config.rs 已在 .gitignore 中（项目默认已配置）
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// 【无线电台身份配置】
+// ----------------------------------------------------------------------------
+
+/// 你的业余无线电呼号（必填）
+pub const MY_CALL: &str = "N0CALL";
+
+/// 你当前位置的 4 位梅登黑德网格（必填）
+pub const MY_GRID: &str = "AA00";
+
+/// 你当前位置的 6 位梅登黑德网格（用于距离计算，选填，可与 MY_GRID 相同）
+pub const MY_GRID_DETAIL: &str = "AA00AA";
+
+// ----------------------------------------------------------------------------
+// 【设备描述信息】
+// ----------------------------------------------------------------------------
+
+/// 电台型号与功率描述（会上报至 PSK Reporter）
+pub const RIG: &str = "Your-Rig 5W";
+
+/// 天线描述（会上报至 PSK Reporter）
+pub const ANTENNA: &str = "Dipole";
+
+/// 软件版本标识（会上报至 PSK Reporter，一般无需修改）
+pub const SOFTWARE: &str = "ESP32S3_Rust_FT8 V0.1";
+
+/// Notion 日志中显示的电台名称
+pub const NOTION_RIG_NAME: &str = "Your-Rig";
+
+/// Notion 日志中显示的天线名称
+pub const NOTION_ANTENNA_NAME: &str = "Your-Antenna";
+
+/// Notion 日志中显示的发射功率
+pub const NOTION_TX_POWER: &str = "5W";
+
+/// Notion 日志中显示的发射 QTH（通常与 MY_GRID 相同）
+pub const NOTION_TX_QTH: &str = "AA00";
+
+// ----------------------------------------------------------------------------
+// 【网络地址配置】
+// ----------------------------------------------------------------------------
+
+/// 无线电台 ESP32 的 UDP 地址（局域网内的 IP 和端口）
+pub const RADIO_ADDR: &str = "192.168.x.x:1432";
+
+/// 本地代理服务器地址（如无需代理，填任意值——直连会自动 fallback）
+pub const PROXY_URL: &str = "http://127.0.0.1:7890";
+
+// ----------------------------------------------------------------------------
+// 【Notion API 凭证】
+// 前往 https://www.notion.so/my-integrations 创建 Integration 获取 Token
+// ----------------------------------------------------------------------------
+
+/// Notion Integration Token（Bearer 令牌）
+pub const NOTION_TOKEN: &str = "ntn_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+
+/// Notion 日志数据库 ID
+/// 在 Notion 中打开数据库页面，URL 中 notion.so/xxxx?... 中的 xxxx 即为 ID
+pub const NOTION_DATABASE_ID: &str = "00000000000000000000000000000000";
+
+// ----------------------------------------------------------------------------
+// 【PSK Reporter 配置】（一般无需修改）
+// ----------------------------------------------------------------------------
+
+/// PSK Reporter 正式服务器（实时上报）
+pub const PSK_REPORTER_HOST: &str = "report.pskreporter.info:4739";
+
+/// PSK Reporter 数据包 Source ID（随机固定值，可自行生成一个 u32）
+pub const PSK_FIXED_RANDOM_ID: u32 = 0xDEADBEEF;

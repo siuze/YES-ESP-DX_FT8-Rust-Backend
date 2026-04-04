@@ -1,0 +1,13 @@
+/target
+/tmp
+
+# 个人敏感配置文件（呼号、API密钥、局域网IP等）
+# 请参考 src/config.rs.example 创建自己的配置
+src/config.rs
+
+# 运行时产生的本地数据文件（不应上传）
+pending_logs.json
+qso_success.json
+contacted_grids.json
+call_to_grid.json
+*.so
