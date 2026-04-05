@@ -45,6 +45,12 @@ pub struct RustStatus {
     pub usb_bw: u16,
     pub lsb_bw: u16,
     pub am_bw: u16,
+    // --- 瀑布图配置 ---
+    pub wf_speed: u8,      // 1-10
+    pub wf_min_db: i16,    // -120
+    pub wf_max_db: i16,    // 0
+    pub wf_full_on: u8,    // 0/1
+    pub wf_zoom_on: u8,    // 0/1
 }
 
 pub struct AppState {

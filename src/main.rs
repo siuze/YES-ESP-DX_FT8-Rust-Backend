@@ -62,6 +62,12 @@ async fn main() {
         s.status.usb_bw = 3000;
         s.status.lsb_bw = 3000;
         s.status.am_bw = 6000;
+        // 瀑布图默认配置
+        s.status.wf_speed = 3;
+        s.status.wf_min_db = -120;
+        s.status.wf_max_db = 0;
+        s.status.wf_full_on = 1;
+        s.status.wf_zoom_on = 1;
     }
     STATE.set(state.clone()).ok();
 

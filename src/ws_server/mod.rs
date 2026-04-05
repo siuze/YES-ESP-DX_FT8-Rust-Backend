@@ -131,6 +131,18 @@ async fn handle_socket(socket: WebSocket, state: Arc<RwLock<AppState>>) {
                                 log_to_pc(&format!("📐 带宽已更新: USB={}Hz, LSB={}Hz, AM={}Hz", u, l, a));
                             }
                         }
+                        9 => {
+                            if bin.len() >= 9 {
+                                s.status.wf_speed = bin[2];
+                                s.status.wf_min_db = i16::from_le_bytes([bin[3], bin[4]]);
+                                s.status.wf_max_db = i16::from_le_bytes([bin[5], bin[6]]);
+                                s.status.wf_full_on = bin[7];
+                                s.status.wf_zoom_on = bin[8];
+                                let min_db = s.status.wf_min_db;
+                                let max_db = s.status.wf_max_db;
+                                log_to_pc(&format!("🌈 瀑布图参数已更新: Speed={}, Range={}~{}dB", bin[2], min_db, max_db));
+                            }
+                        }
                         _ => {}
                     }
                 }
