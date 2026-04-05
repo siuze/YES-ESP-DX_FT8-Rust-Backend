@@ -238,10 +238,15 @@ impl AutoQsoManager {
     pub fn report_any_reply(&mut self) { if self.consecutive_failures > 0 { log_to_pc("✅ 收到回复，重置失败计数"); self.consecutive_failures = 0; } }
 
     /// 从 FT8 消息文本中提取 SNR 字段（格式如 "+05"、"-12"、"R-07" 等）
+    /// 返回纯数值部分 (去掉 "R" 前缀)，如 "R-07" -> "-07"
     fn extract_snr_from_text(text: &str) -> Option<String> {
         let re = regex::Regex::new(r"R?[+-]\d{1,2}$").ok()?;
         let last = text.split_whitespace().last()?;
-        if re.is_match(last) { Some(last.to_string()) } else { None }
+        if re.is_match(last) {
+            // 去掉 "R" 前缀 (FT8 中 R 表示 Roger 确认，不属于 SNR 数值)
+            let snr = last.strip_prefix('R').unwrap_or(last);
+            Some(snr.to_string())
+        } else { None }
     }
 
     /// --- 自动通联核心逻辑 (Mode 3: 自动化全通联处理) ---
@@ -343,7 +348,7 @@ impl AutoQsoManager {
     fn find_quiet_freq(&self, is_even: bool) -> i16 {
         let v = if is_even { &self.fft_noise_even } else { &self.fft_noise_odd };
         if v.is_empty() { return 1000; }
-        let (min_bin, max_bin, win) = ((100.0/2.93) as usize, (2950.0/2.93) as usize, 17);
+        let (min_bin, max_bin, win) = ((200.0/2.93) as usize, (2950.0/2.93) as usize, 17);
         let (mut b_f, mut min_s) = (1000, f32::MAX);
         for b in (min_bin..max_bin).step_by(7) {
             if b + win <= v.len() {

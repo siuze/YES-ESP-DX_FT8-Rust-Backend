@@ -3,6 +3,11 @@ use crate::types::{RADIO_LO_FREQ, Ft8DecodeResult, AUTO_MGR};
 use crate::utils::log_to_pc;
 use crate::radio_ctrl::*;
 
+/// 从 data 的指定偏移读取小端 u16
+#[inline] fn r_u16(data: &[u8], off: usize) -> u16 { u16::from_le_bytes([data[off], data[off+1]]) }
+/// 从 data 的指定偏移读取小端 u64
+#[inline] fn r_u64(data: &[u8], off: usize) -> u64 { u64::from_le_bytes(data[off..off+8].try_into().unwrap()) }
+
 /// 解析电台专有协议的数据包
 pub fn parse_radio_packet(data: &[u8]) {
     if data.len() < 4 { return; }
@@ -16,18 +21,67 @@ pub fn parse_radio_packet(data: &[u8]) {
 
     match msg_type {
         // --- Type 4: RadioStatus (电台状态同步) ---
+        // Payload 起始于 data[4]，共计 73 字节，完整包长 >= 77
         4 => {
-            if data.len() >= 45 {
-                // 频率信息位于偏移 37 字节处 (8字节)
-                let lo_bytes: [u8; 8] = data[37..45].try_into().unwrap_or([0; 8]);
-                let lo_freq = u64::from_le_bytes(lo_bytes);
-                
-                // 更新全局本振频率 (LO)
-                if lo_freq > 0 {
-                    // 同步到原子变量，供 FT8 解码换算绝对频率
-                    RADIO_LO_FREQ.store(lo_freq / 100, Ordering::SeqCst);
-                }
+            if data.len() < 77 { return; }
+            let p = &data[4..]; // payload 起点
+
+            // ===== 系统信息区 (offset 0~32) =====
+            let uptime_us       = r_u64(p, 0);
+            let timestamp_us    = r_u64(p, 8);
+            let core_temp       = r_u16(p, 18);
+            let wifi_rssi       = p[20] as i8;
+            let core0_idle      = p[25];
+            let core1_idle      = p[26];
+            let ram_usage       = p[27];
+            let psram_usage     = p[28];
+
+            // ===== 射频参数区 (offset 33~56) =====
+            let lo_freq         = r_u64(p, 33);
+            let tx_base_freq    = r_u64(p, 41);
+            let tx_offset       = r_u16(p, 49);
+            let tx_state        = p[51];
+            let rx_state        = p[52];
+            let bpf_select      = p[53];
+            let lpf_select      = p[54];
+
+            // ===== 功放区 (offset 57~72) =====
+            let pa_current      = r_u16(p, 61);
+            let swr             = r_u16(p, 67);
+
+            // --- 更新全局 LO 频率 (每包都更新，不受节流) ---
+            if lo_freq > 0 {
+                RADIO_LO_FREQ.store(lo_freq / 100, Ordering::SeqCst);
             }
+
+            // --- 节流：最多 4 秒打印一次 ---
+            use std::sync::atomic::AtomicU64;
+            static LAST_PRINT_MS: AtomicU64 = AtomicU64::new(0);
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let last = LAST_PRINT_MS.load(Ordering::Relaxed);
+            if now_ms - last < 4000 { return; }
+            LAST_PRINT_MS.store(now_ms, Ordering::Relaxed);
+
+            let drift_ms = (now_ms as i64 * 1000 - timestamp_us as i64) / 1000;
+
+            println!(
+                "[📻] Δt:{:+}ms | {:.0}s | {}℃ | WiFi:{}dB | CPU:{}%/{}% | RAM:{}% PS:{}% | LO:{:.3}M TX:{:.3}M+{}Hz | T:{} R:{} BPF:{} LPF:{} | I:{}mA SWR:{:.2}",
+                drift_ms,
+                uptime_us as f64 / 1e6,
+                core_temp,
+                wifi_rssi,
+                100 - core0_idle, 100 - core1_idle,
+                ram_usage, psram_usage,
+                lo_freq as f64 / 1e8,
+                tx_base_freq as f64 / 1e8,
+                tx_offset,
+                tx_state, rx_state, bpf_select, lpf_select,
+                pa_current,
+                swr as f64 / 100.0,
+            );
         }
 
         // --- Type 5: 日志打印消息 (Active) ---
