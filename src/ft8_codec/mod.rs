@@ -872,7 +872,9 @@ fn is_likely_valid_msg(msg: &str) -> bool {
     if !msg.chars().all(|c| c.is_alphanumeric() || " /+-;[]<>:.".contains(c)) { return false; }
 
     let parts: Vec<&str> = msg.split_whitespace().collect();
-    if parts.len() < 2 || parts.len() > 3 { return false; }
+    // 允许 2~4 个 parts，4-part 消息包括 "CQ DX CALL GRID" 等定向 CQ
+    if parts.len() < 2 || parts.len() > 4 { return false; }
+    if parts.len() == 4 && parts[0] != "CQ" { return false; }
 
     for part in &parts {
         // 斜杠校验
