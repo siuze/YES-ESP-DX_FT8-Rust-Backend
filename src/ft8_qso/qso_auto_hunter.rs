@@ -386,7 +386,7 @@ impl AutoQsoManager {
 
     /// --- 活跃通联响应逻辑 (Mode 3 专用) ---
     /// 当处于持续通联模式时，处理针对我的回复消息，并推动状态机向前演进。
-    pub fn handle_auto_qso_logic(&mut self, decoded_msg_raw: &str, snr: i32, freq: f32, dt: f32) {
+    pub fn handle_auto_qso_logic(&mut self, decoded_msg_raw: &str, snr: i32, freq: f32, wind_sec: u8) {
         let state_arc = STATE.get().unwrap();
         let mut s = state_arc.write().unwrap();
 
@@ -399,43 +399,12 @@ impl AutoQsoManager {
         let decoded_msg = decoded_msg_raw.trim().to_uppercase();
         if decoded_msg.is_empty() { return; }
         
-        // 3. 正则匹配检查 (防止干扰和误触发)
-        let is_match = if let Some(re) = &s.expect_regex_compiled {
-            re.is_match(&decoded_msg)
-        } else {
-            // 如果正则还没设置或丢失，且当前正在发的是针对特定人的回复（非 CQ），
-            // 则尝试从字节流恢复，如果还是空，则在 Mode 3 下允许对准包含我呼号的消息
-            let current_re_str = String::from_utf8_lossy(&s.status.expect_regex).trim_matches(char::from(0)).to_string();
-            if !current_re_str.is_empty() {
-                if let Ok(re) = regex::Regex::new(&current_re_str) {
-                    let m = re.is_match(&decoded_msg);
-                    s.expect_regex_compiled = Some(re);
-                    m
-                } else { false }
-            } else {
-                decoded_msg.contains(config::MY_CALL)
-            }
-        };
+        if !decoded_msg.contains(config::MY_CALL) { return; }
 
-        // 3.1 核心修复：多目标排队逻辑 (从备份版本找回)
-        // 如果消息是发给我的，但不匹配当前的正则（说明是另外一个人在叫我），将其存入等待队列
-        if !is_match && decoded_msg.contains(config::MY_CALL) {
-            if let Some(target_call) = crate::ft8_qso::qso_utils::get_sender_call(&decoded_msg) {
-                if !self.task_queue.iter().any(|(m, _, _, _)| m.contains(&target_call)) {
-                    let next_tx = crate::ft8_qso::qso_utils::get_next_tx_msg(&decoded_msg, config::MY_CALL, config::MY_GRID, snr);
-                    if !next_tx.is_empty() {
-                        let tx_is_even = !((dt.round() as i32 % 30) == 0);
-                        self.task_queue.push_back((next_tx, self.find_quiet_freq(tx_is_even), freq as i16, tx_is_even));
-                        log_to_pc(&format!("⏳ 发现新请求，已加入任务队列: {}", target_call));
-                    }
-                }
-            }
-            return;
-        }
+        let sender_raw = crate::ft8_qso::qso_utils::get_sender_call(&decoded_msg).unwrap_or_else(|| "UNKNOWN".to_string());
+        let sender = clean_call(&sender_raw); // 清洗
+        let tx_is_even = !((wind_sec % 30) == 0);
 
-        if !is_match { return; }
-
-        // 4. 生成下一条消息
         let next_tx = crate::ft8_qso::qso_utils::get_next_tx_msg(&decoded_msg, config::MY_CALL, config::MY_GRID, snr);
         if next_tx.is_empty() {
              log_to_pc("🛑 当前通联已结束 (收到73)，清理缓存等待下一轮采样。");
@@ -445,54 +414,59 @@ impl AutoQsoManager {
              return;
         }
 
-        log_to_pc(&format!("🎯 Mode 3 匹配成功 [%{}] -> 下一条: [{}]", decoded_msg, next_tx));
-        
-        // 5. 更新全局状态，触发发射
-        let is_even = (dt.round() as i32 % 30) == 0;
-        let tx_is_even = !is_even;
-        let now = Instant::now();
-        
-        // 5.0 噪音时效性检查 (防止长期发射导致无法监测底噪时造成频段干扰)
-        let last_update = if tx_is_even { self.last_update_even } else { self.last_update_odd };
-        if now.duration_since(last_update) > Duration::from_secs(120) {
-            // 优先级策略：底噪过期时，绝不掐断正在进行的通联（包含 SNR 情况）。
-            // 初始呼叫的特征：包含我的网格，且不含 SNR 数值 (+/-) 或通联进度标识 (RRR, RR73, 73)
-            let is_initial_call = next_tx.contains(config::MY_GRID) 
-                && !next_tx.contains('+') && !next_tx.contains('-') 
-                && !next_tx.contains("RRR") && !next_tx.contains("RR73") && !next_tx.contains(" 73");
+        let current_pending = String::from_utf8_lossy(&s.status.pending_msg).trim_matches(char::from(0)).to_string();
 
-            if is_initial_call || next_tx.starts_with("CQ ") {
-                log_to_pc(&format!("⚠️ 避让：底噪数据已过期 (>120s)，为避让繁忙频率已拦截主动呼叫。Msg: [{}]", next_tx));
-                s.status.pending_msg = [0u8; 24];
-                return;
+        let is_replaceable = current_pending.is_empty() || current_pending.starts_with("CQ ") || 
+            (current_pending.split_whitespace().count() == 3 && current_pending.ends_with(config::MY_GRID));
+
+        if is_replaceable || current_pending.contains(&sender) {
+            log_to_pc(&format!("🎯 Mode 3 响应匹配 [%{}] -> 下一条: [{}]", decoded_msg, next_tx));
+            
+            // 判断是否需要重置重复计数机制 (防止同阶段陷入死循环)
+            let mut should_reset_repeat = true;
+            if next_tx == current_pending {
+                should_reset_repeat = false; // 完全相同的消息不重置计数
+            } else if !current_pending.is_empty() {
+                let p_parts: Vec<&str> = current_pending.split_whitespace().collect();
+                let n_parts: Vec<&str> = next_tx.split_whitespace().collect();
+                if p_parts.len() == 3 && n_parts.len() == 3 && p_parts[0] == sender && n_parts[0] == sender {
+                    let p_last = p_parts[2];
+                    let n_last = n_parts[2];
+                    let is_snr = |s: &str| -> bool { s.starts_with('-') || s.starts_with('+') };
+                    let is_rsnr = |s: &str| -> bool { s.starts_with("R-") || s.starts_with("R+") };
+                    
+                    if is_snr(p_last) && is_snr(n_last) {
+                        should_reset_repeat = false; // 同属普通信号报告，不重置
+                    } else if is_rsnr(p_last) && is_rsnr(n_last) {
+                        should_reset_repeat = false; // 同属带 R 确认信号报告，不重置
+                    }
+                }
             }
-        }
 
-        let bytes = next_tx.as_bytes();
-        let len = bytes.len().min(24);
-        s.status.pending_msg = [0u8; 24];
-        s.status.pending_msg[..len].copy_from_slice(&bytes[..len]);
-        s.status.repeat_count = 0; // 重置重复计数
-        self.report_any_reply(); // 重置连续失败计数
-        
-        // 5.1 频率与窗口同步策略：优先寻找寂静频率 (Split 模式)
-        // pending_offset 为我们的发射频率 (Quiet), target_offset 为目标的频率 (用于重试落地方案)
-        let quiet_f = self.find_quiet_freq(tx_is_even);
-        s.status.pending_offset = quiet_f as u16;
-        s.target_offset = freq as u16;
-        s.status.tx_window_even = if tx_is_even { 1 } else { 0 };
-
-        // 6. 更新下一波期望的正则
-        let next_re_str = crate::ft8_qso::qso_utils::get_next_expect_regex(&next_tx, config::MY_CALL);
-        if !next_re_str.is_empty() {
-            let re_bytes = next_re_str.as_bytes();
-            s.status.expect_regex = [0u8; 48];
-            let re_len = re_bytes.len().min(48);
-            s.status.expect_regex[..re_len].copy_from_slice(&re_bytes[..re_len]);
-            s.expect_regex_compiled = regex::Regex::new(&next_re_str).ok();
-        } else {
+            let bytes = next_tx.as_bytes();
+            let len = bytes.len().min(24);
+            s.status.pending_msg = [0u8; 24];
+            s.status.pending_msg[..len].copy_from_slice(&bytes[..len]);
+            
+            if should_reset_repeat {
+                s.status.repeat_count = 0; // 发生实质性阶段切换才重置
+            }
+            self.report_any_reply(); // 重置连续失败计数
+            
+            let quiet_f = self.find_quiet_freq(tx_is_even);
+            s.status.pending_offset = quiet_f as u16;
+            s.target_offset = freq as u16;
+            s.status.tx_window_even = if tx_is_even { 1 } else { 0 };
+            
+            // 清理掉正则匹配相关遗留字段，以防串联影响
             s.status.expect_regex = [0u8; 48];
             s.expect_regex_compiled = None;
+        } else {
+            if !self.task_queue.iter().any(|(m, _, _, _)| m.contains(&sender)) {
+                log_to_pc(&format!("⏳ 队列等待: {}", sender));
+                let quiet_f = self.find_quiet_freq(tx_is_even);
+                self.task_queue.push_back((next_tx, quiet_f, freq as i16, tx_is_even));
+            }
         }
     }
 }

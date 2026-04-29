@@ -8,7 +8,7 @@ use crate::config;
 /// Mode 2 自动答复驱动函数
 /// 当用户在 Web 端手动选定一个通联目标并开启"自动答复"时，
 /// 每次解码到新消息，由此函数自动决定下一条应发的内容并写入 pending_msg。
-pub fn handle_auto_reply_logic(decoded_msg_raw: &str, snr: i32, freq: f32, dt: f32) {
+pub fn handle_auto_reply_logic(decoded_msg_raw: &str, snr: i32, freq: f32, wind_sec: u8) {
     let state_arc = STATE.get().unwrap();
     let mut s = state_arc.write().unwrap();
 
@@ -77,7 +77,7 @@ pub fn handle_auto_reply_logic(decoded_msg_raw: &str, snr: i32, freq: f32, dt: f
         
         // 5.1 同步频率与窗口 (Mode 2 同样需要追踪目标位置)
         s.status.pending_offset = freq as u16;
-        s.status.tx_window_even = if (dt.round() as i32 % 30) == 0 { 0 } else { 1 };
+        s.status.tx_window_even = if (wind_sec % 30) == 0 { 0 } else { 1 };
 
         // 5. 更新下一条期待正则
         let next_re_str = get_next_expect_regex(&next_tx, config::MY_CALL);
