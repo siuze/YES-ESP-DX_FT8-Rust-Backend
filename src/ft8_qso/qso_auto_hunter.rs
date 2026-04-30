@@ -54,7 +54,7 @@ fn calculate_distance(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
 /// 自动通联管理器 (AutoQsoManager)
 /// 核心职责：处理解码流、维护状态机、决策发射频率、对接 Notion 日志与 PSK Reporter。
 pub struct AutoQsoManager {
-    msg_history: VecDeque<(Instant, Ft8DecodeResult)>, // 最近 30 分钟的解码历史
+    msg_history: VecDeque<(Instant, Ft8DecodeResult, bool)>, // 最近 30 分钟的解码历史 (时间, 结果, 是否偶数窗口)
     successful_calls: HashSet<String>,                 // 已通联成功的呼号集合 (本地持久化)
     attempted_recent: HashMap<String, Instant>,        // 针对同一个目标重试的冷却计时器
     successful_grids: HashSet<String>,                 // 已达成的网格集合
@@ -103,8 +103,8 @@ impl AutoQsoManager {
             successful_calls,
             attempted_recent: HashMap::new(),
             successful_grids,
-            last_incoming_for_me: Instant::now() - Duration::from_secs(600),
-            last_cq_time: Instant::now() - Duration::from_secs(3600),
+            last_incoming_for_me: Instant::now().checked_sub(Duration::from_secs(600)).unwrap_or_else(Instant::now),
+            last_cq_time: Instant::now().checked_sub(Duration::from_secs(3600)).unwrap_or_else(Instant::now),
             task_queue: VecDeque::new(),
             last_logged_at: HashMap::new(),
             location_engine: loc,
@@ -116,8 +116,8 @@ impl AutoQsoManager {
             noise_count: 0,
             noise_dirty: false,
             last_noise_sec: 99,
-            last_update_even: Instant::now() - Duration::from_secs(9999),
-            last_update_odd: Instant::now() - Duration::from_secs(9999),
+            last_update_even: Instant::now().checked_sub(Duration::from_secs(9999)).unwrap_or_else(Instant::now),
+            last_update_odd: Instant::now().checked_sub(Duration::from_secs(9999)).unwrap_or_else(Instant::now),
             consecutive_failures: 0,
             last_save_time: Instant::now(),
             is_dirty: false,
@@ -144,7 +144,7 @@ impl AutoQsoManager {
     }
 
     /// 接收最新解码结果并更新状态池
-    pub fn push_decode(&mut self, res: Ft8DecodeResult) {
+    pub fn push_decode(&mut self, res: Ft8DecodeResult, is_even: bool) {
         let now = Instant::now();
         if res.snr != 99 && res.text.contains(config::MY_CALL) { self.last_incoming_for_me = now; }
 
@@ -160,10 +160,11 @@ impl AutoQsoManager {
         }
         
         // 清理超过 30 分钟的陈旧记录
-        while self.msg_history.front().map_or(false, |(t, _)| now.duration_since(*t) > Duration::from_secs(1800)) {
+        while self.msg_history.front().map_or(false, |(t, _, _)| now.duration_since(*t) > Duration::from_secs(1800)) {
             self.msg_history.pop_front();
         }
-        self.msg_history.push_back((now, res));
+        
+        self.msg_history.push_back((now, res, is_even));
     }
 
     /// 通联日志判定与上报逻辑 (处理 Notion 下发)
@@ -189,7 +190,7 @@ impl AutoQsoManager {
         // 追溯历史中的 SNR 报告
         let mut my_rcv_snr = String::new();
         let mut his_rcv_snr = String::new();
-        for (_, h) in self.msg_history.iter().rev() {
+        for (_, h, _) in self.msg_history.iter().rev() {
             let h_sender = h.sender_call.as_deref().map(clean_call).unwrap_or_default();
             let h_receiver = h.receiver_call.as_deref().map(clean_call).unwrap_or_default();
             if h_sender == his_call && h_receiver == config::MY_CALL {
@@ -272,15 +273,25 @@ impl AutoQsoManager {
     pub fn check_auto_chase(&mut self, is_idle: bool) -> Option<(String, i16, i16, bool)> {
         if !is_idle || Instant::now().duration_since(self.last_incoming_for_me) < Duration::from_secs(30) { return None; }
         let now = Instant::now();
-        let mut candidates: Vec<Ft8DecodeResult> = self.msg_history.iter()
-            .filter(|(t, r)| {
+
+        // 获取当前发射窗口偏好
+        let current_tx_even = {
+            if let Some(state_arc) = STATE.get() {
+                if let Ok(s) = state_arc.read() {
+                    s.status.tx_window_even == 1
+                } else { true }
+            } else { true }
+        };
+
+        let mut candidates: Vec<(Ft8DecodeResult, bool)> = self.msg_history.iter()
+            .filter(|(t, r, _e)| {
                 let call_raw = match r.sender_call.as_ref() { Some(s) => s, None => return false };
                 let is_recent = now.duration_since(*t) < Duration::from_secs(20);
                 let is_far = self.get_distance(&clean_call(call_raw)).unwrap_or(0.0) > 4000.0;
                 is_recent || (is_far && now.duration_since(*t) < Duration::from_secs(300))
             })
-            .map(|(_, r): &(Instant, Ft8DecodeResult)| r.clone())
-            .filter(|r| {
+            .map(|(_, r, e)| (r.clone(), *e))
+            .filter(|(r, _e)| {
                 let call = clean_call(r.sender_call.as_ref().unwrap());
                 if r.sender_call.as_ref().unwrap().contains('<') { return false; }
                 let is_standard_trigger = r.text.starts_with("CQ ") || r.text.contains(" RRR") || r.text.contains(" RR73") || r.text.ends_with(" 73");
@@ -290,7 +301,7 @@ impl AutoQsoManager {
                 is_standard_trigger || is_dx_aggressive || is_super_far
             }).collect();
 
-        candidates.retain(|r| {
+        candidates.retain(|(r, _e)| {
             let call = clean_call(r.sender_call.as_ref().unwrap()); 
             if self.successful_calls.contains(&call) || call == config::MY_CALL { return false; }
             let wait_time = if !Self::is_local_area(&call) { 600 } else { 1200 };
@@ -298,24 +309,43 @@ impl AutoQsoManager {
             true
         });
 
-        // 排序优先级：超级远距离 > 稀有地区 (DX) > CQ消息 > 新网格 > 强SNR
-        candidates.sort_by(|a, b| {
+        // 排序优先级：超级远距离 > 稀有地区 (DX) > 窗口一致性 (New) > CQ消息 > 新网格 > 强SNR
+        candidates.sort_by(|(a, e_a), (b, e_b)| {
             let ac = a.sender_call.as_ref().unwrap(); let bc = b.sender_call.as_ref().unwrap();
-            let asf = self.get_distance(ac).unwrap_or(0.0) > 4000.0; let bsf = self.get_distance(bc).unwrap_or(0.0) > 4000.0;
+            
+            // 1. 超级远距离
+            let asf = self.get_distance(ac).unwrap_or(0.0) > 4000.0; 
+            let bsf = self.get_distance(bc).unwrap_or(0.0) > 4000.0;
             if asf != bsf { return bsf.cmp(&asf); }
-            let ar = !Self::is_local_area(ac); let br = !Self::is_local_area(bc);
+            
+            // 2. 稀有地区 (DX)
+            let ar = !Self::is_local_area(ac); 
+            let br = !Self::is_local_area(bc);
             if ar != br { return br.cmp(&ar); }
+
+            // 3. 窗口一致性：尽量不变更奇偶窗口 (目标是偶数，则我们需要在奇数发送，反之亦然)
+            let a_tx_even = !*e_a;
+            let b_tx_even = !*e_b;
+            let a_match = a_tx_even == current_tx_even;
+            let b_match = b_tx_even == current_tx_even;
+            if a_match != b_match { return b_match.cmp(&a_match); }
+
+            // 4. CQ 优先
             let acq = a.text.starts_with("CQ "); let bcq = b.text.starts_with("CQ ");
             if acq != bcq { return bcq.cmp(&acq); }
+            
+            // 5. 新网格
             let ang = a.grid.as_ref().map_or(false, |g| !self.successful_grids.contains(g));
             let bng = b.grid.as_ref().map_or(false, |g| !self.successful_grids.contains(g));
             if ang != bng { return bng.cmp(&ang); }
+            
+            // 6. 强 SNR
             b.snr.cmp(&a.snr)
         });
 
-        if let Some(target) = candidates.first() {
+        if let Some((target, e)) = candidates.first() {
             let call = target.sender_call.as_ref().unwrap();
-            let tx_even = !((target.dt.round() as i32 % 30) == 0);
+            let tx_even = !*e;
             if now.duration_since(if tx_even { self.last_update_even } else { self.last_update_odd }) > Duration::from_secs(120) {
                 crate::utils::log_to_pc(&format!("⚠️ 目标窗口噪声过旧，等待更新...")); return None;
             }
@@ -335,13 +365,30 @@ impl AutoQsoManager {
         if !is_failed_driven && now.duration_since(self.last_incoming_for_me) < Duration::from_secs(45) { return None; }
         if !is_failed_driven && now.duration_since(self.last_cq_time) < Duration::from_secs(180) { return None; }
         
-        let is_even = chrono::Utc::now().second() > 20 && chrono::Utc::now().second() < 50;
-        if now.duration_since(if is_even { self.last_update_even } else { self.last_update_odd }) > Duration::from_secs(120) { return None; }
+        // 判定即将进入的窗口奇偶性：14->15(Odd), 29->30(Even), 44->45(Odd), 59->00(Even)
+        let sec = chrono::Utc::now().second();
+        let next_is_even = ((sec + 1) % 30) < 15;
+        
+        // 尽量保持发射窗口一致性 (从全局状态读取当前偏好)
+        let current_tx_even = {
+            if let Some(state_arc) = STATE.get() {
+                if let Ok(s) = state_arc.read() {
+                    s.status.tx_window_even == 1
+                } else { true }
+            } else { true }
+        };
+        
+        if next_is_even != current_tx_even {
+             // 如果即将进入的窗口与当前偏好不符，则跳过本次，等待下一个 15s 周期以保持窗口一致
+             return None;
+        }
+
+        if now.duration_since(if next_is_even { self.last_update_even } else { self.last_update_odd }) > Duration::from_secs(120) { return None; }
         
         self.last_cq_time = now;
         self.consecutive_failures = 0; 
         log_to_pc("🎯 状态机策略触发: 发起自动调优 CQ");
-        Some((format!("CQ {} {}", config::MY_CALL, config::MY_GRID), self.find_quiet_freq(is_even), is_even))
+        Some((format!("CQ {} {}", config::MY_CALL, config::MY_GRID), self.find_quiet_freq(next_is_even), next_is_even))
     }
 
     /// 智能频率选择：根据采集到的波段能量谱，寻找 50Hz 宽度的最寂静窗。

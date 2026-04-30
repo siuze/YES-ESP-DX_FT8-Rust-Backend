@@ -150,7 +150,9 @@ pub fn parse_radio_packet(data: &[u8]) {
 
                 if let Some(mgr_arc) = AUTO_MGR.get() {
                     if let Ok(mut mgr) = mgr_arc.lock() {
-                        mgr.push_decode(echo_res);
+                        use chrono::Timelike;
+                        let is_even = (chrono::Utc::now().second() / 15) % 2 == 0;
+                        mgr.push_decode(echo_res, is_even);
                     }
                 }
             }

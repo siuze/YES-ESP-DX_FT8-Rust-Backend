@@ -1,13 +1,18 @@
 fn main() {
-    // 获取项目根目录
     let project_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     
-    // 1. 告诉 Rust 到哪里找你的 libwsjtx_bridge.so
+    // 1. 寻找库文件的路径
     println!("cargo:rustc-link-search=native={}/libs", project_dir);
 
-    // 2. 只需要链接这一个库
+    // 2. 链接库名 (不带 lib 前缀和 .dll/.so 后缀)
     println!("cargo:rustc-link-lib=dylib=wsjtx_bridge");
 
-    // 3. 设置运行时路径 RPATH，让编译出来的程序在同级目录找 libs
-    println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/libs");
+    // 3. 只有在 Linux 下才设置 RPATH
+    #[cfg(target_os = "linux")]
+    {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/libs");
+    }
+
+    // 4. 如果你在 Windows 上使用 MSVC (link.exe)，屏蔽掉 Linux 的链接参数
+    // Windows 找 DLL 的逻辑是搜索 .exe 同级目录，所以不需要 RPATH
 }

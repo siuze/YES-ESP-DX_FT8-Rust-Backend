@@ -126,7 +126,8 @@ fn process_ft8_decode(samples_i16: Vec<i16>, psk_tx: tokio::sync::mpsc::Sender<P
             // --- C. 进入 AutoQsoManager 状态机处理 (针对 Mode 3: 自动化全通联处理) ---
             {
                 let mut mgr = AUTO_MGR.get().unwrap().lock().unwrap();
-                mgr.push_decode(res.clone());                // 更新历史解码信息
+                let window_is_even = (p_sec % 30) == 0;
+                mgr.push_decode(res.clone(), window_is_even);                // 更新历史解码信息
                 mgr.check_and_log_qso(&res);                 // 检查通联是否完成
                 mgr.handle_auto_qso_logic(&res.text, res.snr, res.freq, p_sec); // [核心修复] 处理模式 3 下针对我的回复
                 if res.text.contains(config::MY_CALL) { mgr.report_any_reply(); } // 用于防止误触发紧急 CQ

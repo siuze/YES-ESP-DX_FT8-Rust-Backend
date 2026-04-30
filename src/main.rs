@@ -11,6 +11,7 @@ pub mod utils;        // 基础工具类（日志输出、字节解析等）
 pub mod ft8_codec;    // FT8 物理层编解码封装 (原 ft8_rust)
 pub mod ft8_qso;      // 自动通联业务大类 (包含 auto_qso, notion_logger, psk_reporter)
 pub mod tasks;        // 具体的后台常驻异步任务
+pub mod dsp;
 pub mod ws_server;    // WebSocket 服务器及指令下发协议
 pub mod radio_ctrl;    // 电台 UDP 协议控制模块
 
