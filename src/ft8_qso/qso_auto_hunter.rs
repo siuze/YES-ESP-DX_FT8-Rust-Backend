@@ -378,8 +378,11 @@ impl AutoQsoManager {
             } else { true }
         };
         
-        if next_is_even != current_tx_even {
-             // 如果即将进入的窗口与当前偏好不符，则跳过本次，等待下一个 15s 周期以保持窗口一致
+        // 允许切换窗口的条件：很长时间没有通联成功/收到消息 (10分钟)
+        let allow_parity_change = now.duration_since(self.last_incoming_for_me) > Duration::from_secs(600);
+        
+        if !allow_parity_change && next_is_even != current_tx_even {
+             // 如果即将进入的窗口与当前偏好不符，且不满足切换条件，则跳过本次，等待下一个 15s 周期以保持窗口一致
              return None;
         }
 

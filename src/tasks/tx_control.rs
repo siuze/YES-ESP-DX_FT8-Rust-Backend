@@ -44,19 +44,7 @@ pub fn spawn_tx_check_task(state: Arc<RwLock<AppState>>) {
                             match crate::radio_ctrl::send_ft8_transmit(&target_ip, &pending_msg, use_f) {
                                 Ok(_) => {
                                     log_to_pc(&format!("🚀 [发射指令已下发] Msg: {} | Freq: {} Hz | IP: {}", pending_msg, use_f, target_ip));
-                                    
-                                    // 更新统计
                                     s.status.tx_count += 1;
-                                    s.status.repeat_count += 1;
-
-                                    // 如果是单次模式 (Mode 1 或 2)，判定是否需要结束
-                                    if mode == 1 || (mode == 2 && (s.status.repeat_count >= max_rep || pending_msg.contains(" 73"))) {
-                                        if pending_msg.contains(" 73") || s.status.repeat_count >= max_rep {
-                                            s.status.auto_tx_mode = 0;
-                                            s.status.pending_msg = [0u8; 24]; // 清空
-                                            log_to_pc("🏁 单次任务已完成，回复空闲模式。");
-                                        }
-                                    }
                                 }
                                 Err(e) => {
                                     log_to_pc(&format!("❌ [发射失败] UDP 写入错误: {}", e));
@@ -65,6 +53,19 @@ pub fn spawn_tx_check_task(state: Arc<RwLock<AppState>>) {
                         } else {
                             log_to_pc("⚠️ [发射阻塞] 未发现电台 IP，请检查连接或等待自动发现。");
                         }
+                        
+                        // 无论成功与否都增加 repeat_count，防止状态机在网络或 IP 错误时永久卡死
+                        s.status.repeat_count += 1;
+
+                        // 如果是单次模式 (Mode 1 或 2)，判定是否需要结束
+                        if mode == 1 || (mode == 2 && (s.status.repeat_count >= max_rep || pending_msg.contains(" 73"))) {
+                            if pending_msg.contains(" 73") || s.status.repeat_count >= max_rep {
+                                s.status.auto_tx_mode = 0;
+                                s.status.pending_msg = [0u8; 24]; // 清空
+                                log_to_pc("🏁 单次任务已完成，回复空闲模式。");
+                            }
+                        }
+
                         should_sleep = true;
                     }
                 }
