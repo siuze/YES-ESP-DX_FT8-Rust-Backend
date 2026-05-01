@@ -107,10 +107,9 @@ pub fn spawn_auto_qso_timer_task() {
                 
                 // 判定当前重复次数是否达到上限，或者是否有其他更高优先级的回复排队中
                 let has_others = !mgr.task_queue.is_empty();
-                let limit_reached = if is_73 { repeat_count >= 1 } 
-                                   else if has_others && repeat_count >= 2 { true } // 若有新任务排队且当前已重复2次，优先切走
-                                   else if is_chase { repeat_count >= 3 } 
-                                   else { repeat_count >= 4 }; // CQ 重复 4 次
+                let limit_reached = if is_73 { repeat_count >= 2 } 
+                                   else if has_others && repeat_count >= 3 { true } // 若有新任务排队且当前已重复3次，优先切走
+                                   else { repeat_count >= 5 }; // 常规追踪和 CQ 都给足上限，确保在收到对方消息后能回复 4~5 次
 
                 // 核心逻辑 A: 判定当前任务是否结束 (超时/达成/手动清空) 并尝试拉取新任务
                 if (!is_idle && limit_reached) || (is_idle && !mgr.task_queue.is_empty()) {
