@@ -35,6 +35,9 @@ async fn main() {
     let (_notion_mgr, notion_tx) = NotionLogger::new();
     let mgr = Arc::new(Mutex::new(AutoQsoManager::new(notion_tx)));
     AUTO_MGR.set(mgr.clone()).ok();
+    
+    // 初始化本地呼号到哈希缓存，防止收到针对自己的哈希消息时解码为 <...>
+    crate::ft8_codec::packjt77::save_hash_call(config::MY_CALL);
 
     // --- 2. 初始化全局广播通道 (用于同步给所有 WS 客户端) ---
     let (tx, _) = broadcast::channel(1024);

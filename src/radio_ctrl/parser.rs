@@ -136,6 +136,11 @@ pub fn parse_radio_packet(data: &[u8]) {
                     (None, None)
                 };
 
+                // 将本地发射的呼号（包括本机呼号）也注入到哈希表，防止别人发来哈希时无法解析
+                for part in &parts {
+                    crate::ft8_codec::packjt77::save_hash_call(part);
+                }
+
                 let echo_res = Ft8DecodeResult {
                     freq: echo_offset as f32,
                     dt: 0.0,
