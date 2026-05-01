@@ -383,11 +383,20 @@ impl AutoQsoManager {
         let v = if is_even { &self.fft_noise_even } else { &self.fft_noise_odd };
         if v.is_empty() { return 1000; }
         let (min_bin, max_bin, win) = ((200.0/2.93) as usize, (2950.0/2.93) as usize, 17);
-        let (mut b_f, mut min_s) = (1000, f32::MAX);
+        let (mut b_f, mut min_score) = (1000, f32::MAX);
         for b in (min_bin..max_bin).step_by(7) {
             if b + win <= v.len() {
                 let s: f32 = v[b..b+win].iter().sum();
-                if s < min_s { min_s = s; b_f = (b as f32 * 2.93) as i16; }
+                let freq = (b as f32 * 2.93) as i16;
+                
+                // 为照顾部分电台滤波器的带通特性，优先选择 500~2500Hz。
+                // 对超出此“黄金频段”的区域施加 1.3 倍底噪惩罚，除非该区域极其安静，否则不予选择。
+                let score = if freq >= 500 && freq <= 2500 { s } else { s * 1.3 };
+                
+                if score < min_score { 
+                    min_score = score; 
+                    b_f = freq; 
+                }
             }
         }
         b_f
