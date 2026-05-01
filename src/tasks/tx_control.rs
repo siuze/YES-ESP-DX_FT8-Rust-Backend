@@ -103,13 +103,18 @@ pub fn spawn_auto_qso_timer_task() {
                 
                 let is_73 = current_msg.contains(" 73") || current_msg.contains(" RR73");
                 let is_cq = current_msg.starts_with("CQ ");
+                let is_reply = current_msg.contains(" R-") || current_msg.contains(" R+") 
+                            || current_msg.contains(" -") || current_msg.contains(" +")
+                            || current_msg.contains(" RRR");
+                let is_initial_call = !is_cq && !is_73 && !is_reply;
                 let is_chase = !is_73 && !is_cq;
                 
                 // 判定当前重复次数是否达到上限，或者是否有其他更高优先级的回复排队中
                 let has_others = !mgr.task_queue.is_empty();
                 let limit_reached = if is_73 { repeat_count >= 2 } 
                                    else if has_others && repeat_count >= 3 { true } // 若有新任务排队且当前已重复3次，优先切走
-                                   else { repeat_count >= 5 }; // 常规追踪和 CQ 都给足上限，确保在收到对方消息后能回复 4~5 次
+                                   else if is_initial_call { repeat_count >= 3 }    // 主动呼叫（发网格）仅尝试 3 次
+                                   else { repeat_count >= 5 }; // 常规回复 (带SNR/RRR) 和 CQ 都给足上限 5 次
 
                 // 核心逻辑 A: 判定当前任务是否结束 (超时/达成/手动清空) 并尝试拉取新任务
                 if (!is_idle && limit_reached) || (is_idle && !mgr.task_queue.is_empty()) {

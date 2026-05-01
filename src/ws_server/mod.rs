@@ -143,6 +143,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<RwLock<AppState>>) {
                                 log_to_pc(&format!("🌈 瀑布图参数已更新: Speed={}, Range={}~{}dB", bin[2], min_db, max_db));
                             }
                         }
+                        10 => {
+                            if bin.len() >= 6 {
+                                let gain = f32::from_le_bytes([bin[2], bin[3], bin[4], bin[5]]);
+                                s.status.rx_gain = gain;
+                                log_to_pc(&format!("🔊 数字增益已调整为: {:.1}x", gain));
+                            }
+                        }
                         _ => {}
                     }
                 }

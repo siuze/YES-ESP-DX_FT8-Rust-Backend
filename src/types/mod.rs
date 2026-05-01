@@ -51,6 +51,7 @@ pub struct RustStatus {
     pub wf_max_db: i16,    // 0
     pub wf_full_on: u8,    // 0/1
     pub wf_zoom_on: u8,    // 0/1
+    pub rx_gain: f32,      // 软件数字增益 (例如 1.0 ~ 50.0)
 }
 
 pub struct AppState {

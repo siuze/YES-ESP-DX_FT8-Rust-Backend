@@ -50,11 +50,11 @@ pub fn spawn_dsp_task(state: Arc<RwLock<AppState>>, decode_buf: Arc<Mutex<Decode
             if let Ok((size, _)) = socket.recv_from(&mut raw_buf).await {
                 if size != PKT_SIZE_IQ { continue; }
 
-                let (cur_if, demod_mode, ft8_decode_on, audio_on, usb_bw, lsb_bw, am_bw, wf_speed, wf_full_on, wf_zoom_on, wf_min_db, wf_max_db) = { 
+                let (cur_if, demod_mode, ft8_decode_on, audio_on, usb_bw, lsb_bw, am_bw, wf_speed, wf_full_on, wf_zoom_on, wf_min_db, wf_max_db, rx_gain) = { 
                     let s = state.read().unwrap();
                     (s.current_if_hz as f32, s.status.demod_mode, s.status.ft8_decode_on, 
                      s.status.audio_on, s.status.usb_bw, s.status.lsb_bw, s.status.am_bw,
-                     s.status.wf_speed, s.status.wf_full_on, s.status.wf_zoom_on, s.status.wf_min_db, s.status.wf_max_db)
+                     s.status.wf_speed, s.status.wf_full_on, s.status.wf_zoom_on, s.status.wf_min_db, s.status.wf_max_db, s.status.rx_gain)
                 };
                 
                 engine.update_taps(usb_bw, lsb_bw, am_bw);
@@ -169,7 +169,7 @@ pub fn spawn_dsp_task(state: Arc<RwLock<AppState>>, decode_buf: Arc<Mutex<Decode
 
                         // ===== 音频流输出 (ADPCM, 0x05) =====
                         if audio_on == 1 {
-                            let s = (f_i.clamp(-1.0, 1.0) * 32767.0) as i16;
+                            let s = ((f_i * rx_gain).clamp(-1.0, 1.0) * 32767.0) as i16;
                             audio_accum.push(s);
                             if audio_accum.len() >= 256 {
                                 let mut pkt = vec![0x05]; // Audio pkt
@@ -187,7 +187,7 @@ pub fn spawn_dsp_task(state: Arc<RwLock<AppState>>, decode_buf: Arc<Mutex<Decode
 
                         // ===== FT8 采样缓冲推送 (跟随 ft8_decode_on) =====
                         if ft8_decode_on == 1 {
-                             local_samples.push((f_i.clamp(-1.0, 1.0) * 32767.0) as i16);
+                             local_samples.push(((f_i * rx_gain).clamp(-1.0, 1.0) * 32767.0) as i16);
                              if local_samples.len() >= 128 {
                                  let mut locked_buf = decode_buf.lock().unwrap();
                                  for s in &local_samples { locked_buf.push(*s); }
