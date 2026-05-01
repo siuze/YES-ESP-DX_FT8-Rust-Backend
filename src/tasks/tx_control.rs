@@ -33,8 +33,8 @@ pub fn spawn_tx_check_task(state: Arc<RwLock<AppState>>) {
                     if mode > 0 && !pending_msg.is_empty() && (s.status.tx_window_even == 1) == is_even_win {
                         // 2. 确定发射 IP
                         if let Some(target_ip) = s.radio_ip.clone() {
-                            // 3. 确定最终频偏 (Homing 策略)
-                            let use_f = if mode == 3 && s.status.repeat_count >= 2 && !pending_msg.starts_with("CQ ") {
+                            // 3. 确定最终频偏 (Homing 策略：交替使用寂静频率和对方频率)
+                            let use_f = if mode == 3 && !pending_msg.starts_with("CQ ") && s.status.repeat_count % 2 == 1 {
                                 s.target_offset
                             } else {
                                 s.status.pending_offset
@@ -133,7 +133,7 @@ pub fn spawn_auto_qso_timer_task() {
                     } else {
                         s.status.pending_msg = [0u8; 24];
                         if mgr.consecutive_failures >= 2 {
-                            log_to_pc("⏭️ 队列已清空，检测到连续失败，准备开启紧急 CQ 或策略刷新");
+                            log_to_pc("⏭️ 队列已清空，检测到连续 2 次失败，准备开启紧急 CQ 插入");
                         } else {
                             log_to_pc("⏭️ 队列已清空，任务完成回到空闲状态");
                         }

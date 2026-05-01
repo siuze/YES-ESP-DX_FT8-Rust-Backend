@@ -365,33 +365,17 @@ impl AutoQsoManager {
         if !is_failed_driven && now.duration_since(self.last_incoming_for_me) < Duration::from_secs(45) { return None; }
         if !is_failed_driven && now.duration_since(self.last_cq_time) < Duration::from_secs(180) { return None; }
         
-        // 判定即将进入的窗口奇偶性：14->15(Odd), 29->30(Even), 44->45(Odd), 59->00(Even)
-        let sec = chrono::Utc::now().second();
-        let next_is_even = ((sec + 1) % 30) < 15;
-        
-        // 尽量保持发射窗口一致性 (从全局状态读取当前偏好)
-        let current_tx_even = {
-            if let Some(state_arc) = STATE.get() {
-                if let Ok(s) = state_arc.read() {
-                    s.status.tx_window_even == 1
-                } else { true }
-            } else { true }
-        };
-        
-        // 允许切换窗口的条件：很长时间没有通联成功/收到消息 (10分钟)
-        let allow_parity_change = now.duration_since(self.last_incoming_for_me) > Duration::from_secs(600);
-        
-        if !allow_parity_change && next_is_even != current_tx_even {
-             // 如果即将进入的窗口与当前偏好不符，且不满足切换条件，则跳过本次，等待下一个 15s 周期以保持窗口一致
-             return None;
-        }
+        use chrono::Timelike;
+        let minute = chrono::Utc::now().minute();
+        // 严格的 CQ 奇偶窗口规则：每小时前半小时 (0-29分) 偶数窗口，后半小时 (30-59分) 奇数窗口
+        let required_cq_even = minute < 30;
 
-        if now.duration_since(if next_is_even { self.last_update_even } else { self.last_update_odd }) > Duration::from_secs(120) { return None; }
+        if now.duration_since(if required_cq_even { self.last_update_even } else { self.last_update_odd }) > Duration::from_secs(120) { return None; }
         
         self.last_cq_time = now;
         self.consecutive_failures = 0; 
-        log_to_pc("🎯 状态机策略触发: 发起自动调优 CQ");
-        Some((format!("CQ {} {}", config::MY_CALL, config::MY_GRID), self.find_quiet_freq(next_is_even), next_is_even))
+        log_to_pc(&format!("🎯 状态机策略触发: 发起自动调优 CQ (指定窗口: {})", if required_cq_even { "偶数" } else { "奇数" }));
+        Some((format!("CQ {} {}", config::MY_CALL, config::MY_GRID), self.find_quiet_freq(required_cq_even), required_cq_even))
     }
 
     /// 智能频率选择：根据采集到的波段能量谱，寻找 50Hz 宽度的最寂静窗。
@@ -499,7 +483,13 @@ impl AutoQsoManager {
             s.status.pending_msg[..len].copy_from_slice(&bytes[..len]);
             
             if should_reset_repeat {
-                s.status.repeat_count = 0; // 发生实质性阶段切换才重置
+                s.status.repeat_count = 0; // 发生实质性阶段切换，从头开始，首发寂静频率
+            } else {
+                // 对方重复发送消息，我们需要无限期陪跑（防止因为达到 4 次上限而断开），
+                // 同时我们要**保持频偏交替逻辑**！
+                // 此时 repeat_count % 2 的值恰好指示了下一个应该用的频率。
+                // 我们直接取模并保留奇偶性，这样既重置了超时机制，又完美对换/延续了双频交替顺序。
+                s.status.repeat_count = s.status.repeat_count % 2;
             }
             self.report_any_reply(); // 重置连续失败计数
             
