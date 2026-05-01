@@ -100,12 +100,12 @@ fn lookup_hash10(h10: u32) -> String {
 
 fn lookup_hash12(h12: u32) -> String {
     let guard = get_cache();
-    guard.as_ref().unwrap().calls12.get(&h12).cloned().map(|c| format!("<{}>", c)).unwrap_or("<...>".to_string())
+    guard.as_ref().unwrap().calls12.get(&h12).cloned().map(|c| format!("<{}>", c)).unwrap_or_else(|| format!("<...{}>", h12))
 }
 
 fn lookup_hash22(h22: u32) -> String {
     let guard = get_cache();
-    guard.as_ref().unwrap().calls22.get(&h22).cloned().map(|c| format!("<{}>", c)).unwrap_or("<...>".to_string())
+    guard.as_ref().unwrap().calls22.get(&h22).cloned().map(|c| format!("<{}>", c)).unwrap_or_else(|| format!("<...{}>", h22))
 }
 
 // --- 解包逻辑 ---
