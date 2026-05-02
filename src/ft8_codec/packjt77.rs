@@ -77,6 +77,25 @@ pub fn save_hash_call(call: &str) {
     let call = call.trim_matches(|c| c == '<' || c == '>').trim();
     if call.len() < 3 { return; }
 
+    // 保存原始全名
+    save_single_call(call);
+
+    // 如果是复合呼号 (如 R5AF/0)，尝试保存基准呼号 (R5AF)
+    // 这样后续的 Suffix 模式编码才能通过 12-bit Hash 找回基准名字
+    if let Some(slash_pos) = call.find('/') {
+        let parts: Vec<&str> = call.split('/').collect();
+        // 找出最像呼号的那部分 (通常是中间那个，或者最长的那个)
+        let mut base = parts[0];
+        for p in &parts {
+            if p.len() > base.len() { base = p; }
+        }
+        if base.len() >= 3 && base != call {
+            save_single_call(base);
+        }
+    }
+}
+
+fn save_single_call(call: &str) {
     let h10 = ihashcall(call, 10);
     let h12 = ihashcall(call, 12);
     let h22 = ihashcall(call, 22);
@@ -84,8 +103,6 @@ pub fn save_hash_call(call: &str) {
     let mut guard = get_cache();
     let cache = guard.as_mut().unwrap();
     
-    // WSJTX allows around 50,000 max calls. We stop inserting if it's too full
-    // instead of wiping the entire memory, which causes hash amnesia for active QSO targets.
     if cache.calls22.len() < 50000 {
         cache.calls10.insert(h10, call.to_string());
         cache.calls12.insert(h12, call.to_string());
@@ -136,7 +153,24 @@ fn unpack28(n28: u32) -> (Option<String>, bool) {
                 );
                 Some(format!("CQ {}", s.trim()))
             }
-            _ => Some("<...>".to_string()), 
+            532444..=2063591 => {
+                // Callsign with suffix /R, /P, /0-9, /QRP
+                let n = n28 - 532444;
+                let isuffix = (n % 13) as usize;
+                let h12 = n / 13;
+                let base_call = lookup_hash12(h12);
+                let suffix_str = match isuffix {
+                    0 => "/R",
+                    1 => "/P",
+                    12 => "/QRP",
+                    _ => { // 2..11 对应 /0..9
+                        let digit = isuffix - 2;
+                        return (Some(format!("{}/{}", base_call, digit)), true);
+                    }
+                };
+                return (Some(format!("{}{}", base_call, suffix_str)), true);
+            }
+            _ => Some(format!("<...{}>", n28)), 
         };
         return (res, true);
     }
