@@ -114,7 +114,7 @@ pub fn spawn_auto_qso_timer_task() {
                 let limit_reached = if is_73 { repeat_count >= 2 } 
                                    else if has_others && repeat_count >= 3 { true } // 若有新任务排队且当前已重复3次，优先切走
                                    else if is_initial_call { repeat_count >= 3 }    // 主动呼叫（发网格）仅尝试 3 次
-                                   else { repeat_count >= 5 }; // 常规回复 (带SNR/RRR) 和 CQ 都给足上限 5 次
+                                   else { repeat_count >= 4 }; // 常规回复 (带SNR/RRR) 和 CQ 都给足上限 5 次
 
                 // 核心逻辑 A: 判定当前任务是否结束 (超时/达成/手动清空) 并尝试拉取新任务
                 if (!is_idle && limit_reached) || (is_idle && !mgr.task_queue.is_empty()) {

@@ -71,7 +71,7 @@ async fn main() {
         s.status.wf_max_db = 0;
         s.status.wf_full_on = 1;
         s.status.wf_zoom_on = 1;
-        s.status.rx_gain = 1.0;
+        s.status.rx_gain = 10.0;
     }
     STATE.set(state.clone()).ok();
 

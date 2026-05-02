@@ -391,7 +391,7 @@ impl AutoQsoManager {
                 
                 // 为照顾部分电台滤波器的带通特性，优先选择 500~2500Hz。
                 // 对超出此“黄金频段”的区域施加 1.6 倍底噪惩罚，除非该区域极其安静，否则不予选择。
-                let score = if freq >= 500 && freq <= 2500 { s } else { s * 1.6 };
+                let score = if freq >= 500 && freq <= 2700 { s } else { s * 1.6 };
                 
                 if score < min_score { 
                     min_score = score; 
