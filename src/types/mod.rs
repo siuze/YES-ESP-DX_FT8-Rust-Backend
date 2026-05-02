@@ -62,6 +62,7 @@ pub struct AppState {
     pub expect_regex_compiled: Option<Regex>,
     pub target_offset: u16,
     pub radio_ip: Option<String>,
+    pub qso_total_tx_count: u8,
 }
 
 #[repr(C, packed)]

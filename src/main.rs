@@ -52,6 +52,7 @@ async fn main() {
         expect_regex_compiled: None,
         target_offset: 1000,
         radio_ip: initial_ip,
+        qso_total_tx_count: 0,
     }));
     {
         let mut s = state.write().unwrap();

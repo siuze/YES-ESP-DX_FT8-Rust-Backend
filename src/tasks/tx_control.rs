@@ -59,6 +59,7 @@ pub fn spawn_tx_check_task(state: Arc<RwLock<AppState>>) {
                         
                         // 无论成功与否都增加 repeat_count，防止状态机在网络或 IP 错误时永久卡死
                         s.status.repeat_count += 1;
+                        s.qso_total_tx_count += 1; // [关键修复] 记录总计发射次数，不受重置影响
 
                         // 如果是单次模式 (Mode 1 或 2)，判定是否需要结束
                         if mode == 1 || (mode == 2 && (s.status.repeat_count >= max_rep || pending_msg.contains(" 73"))) {
@@ -97,10 +98,10 @@ pub fn spawn_auto_qso_timer_task() {
         let mut ticker = interval(Duration::from_millis(100));
         loop {
             ticker.tick().await;
-            let (mode, is_idle, repeat_count, current_msg) = {
+            let (mode, is_idle, repeat_count, total_tx, current_msg) = {
                 let s = STATE.get().unwrap().read().unwrap();
                 let msg = String::from_utf8_lossy(&s.status.pending_msg).trim_matches(char::from(0)).to_string();
-                (s.status.auto_tx_mode, s.status.pending_msg[0] == 0, s.status.repeat_count, msg)
+                (s.status.auto_tx_mode, s.status.pending_msg[0] == 0, s.status.repeat_count, s.qso_total_tx_count, msg)
             };
             if mode != 3 { continue; }
 
@@ -123,7 +124,8 @@ pub fn spawn_auto_qso_timer_task() {
                 
                 // 判定当前重复次数是否达到上限，或者是否有其他更高优先级的回复排队中
                 let has_others = !mgr.task_queue.is_empty();
-                let limit_reached = if is_73 { repeat_count >= 2 } 
+                let limit_reached = if total_tx >= 10 { true } // [关键死线] 总计发射 10 次强制停止，防止无限死锁 (哪怕 repeat_count 被重置过)
+                                   else if is_73 { repeat_count >= 2 } 
                                    else if has_others && repeat_count >= 3 { true } // 若有新任务排队且当前已重复3次，优先切走
                                    else if is_initial_call { repeat_count >= 3 }    // 主动呼叫（发网格）仅尝试 3 次
                                    else { repeat_count >= 4 }; // 常规回复 (带SNR/RRR) 和 CQ 都给足上限 5 次
@@ -145,9 +147,11 @@ pub fn spawn_auto_qso_timer_task() {
                         s.target_offset = target_f as u16;
                         s.status.tx_window_even = if next_e { 1 } else { 0 };
                         s.status.repeat_count = 0;
+                        s.qso_total_tx_count = 0; // 切换新任务，重置总计计数
                         log_to_pc(&format!("⏭️ 自动切换任务队列: {}", next_m));
                     } else {
                         s.status.pending_msg = [0u8; 24];
+                        s.qso_total_tx_count = 0; // 归零
                         if mgr.consecutive_failures >= 2 {
                             log_to_pc("⏭️ 队列已清空，检测到连续 2 次失败，准备开启紧急 CQ 插入");
                         } else {
@@ -174,6 +178,7 @@ pub fn spawn_auto_qso_timer_task() {
                             s.target_offset = f as u16;
                             s.status.tx_window_even = if e { 1 } else { 0 };
                             s.status.repeat_count = 0;
+                            s.qso_total_tx_count = 0; // 重置
                             log_to_pc(&format!("🎯 策略触发 (CQ): {}", msg));
                             triggered = true;
                         }
@@ -191,6 +196,7 @@ pub fn spawn_auto_qso_timer_task() {
                             s.target_offset = target_f as u16;
                             s.status.tx_window_even = if e { 1 } else { 0 };
                             s.status.repeat_count = 0;
+                            s.qso_total_tx_count = 0; // 重置
                             log_to_pc(&format!("🎯 策略触发 (Chase): {}", msg));
                         }
                     }
