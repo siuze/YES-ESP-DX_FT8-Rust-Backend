@@ -4,9 +4,11 @@ use crate::utils::log_to_pc;
 use std::collections::{VecDeque, HashMap, HashSet};
 use std::time::{Duration, Instant};
 use std::sync::atomic::Ordering;
-use std::fs; 
-use chrono::Timelike;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use chrono::{Utc, Timelike};
 use crate::ft8_qso::location::LocationEngine; 
+use radif::{Record, Field};
 
 use crate::config;
 
@@ -169,14 +171,18 @@ impl AutoQsoManager {
 
     /// 通联日志判定与上报逻辑 (处理 Notion 下发)
     pub fn check_and_log_qso(&mut self, res: &Ft8DecodeResult) {
+        let sender = res.sender_call.as_deref().map(clean_call).unwrap_or_default();
         let receiver = res.receiver_call.as_deref().map(clean_call).unwrap_or_default();
-        if receiver != config::MY_CALL { return; }
         
-        // 只有收到对方的 RR73/RRR/73 标识通联正式结束，才会记录日志
+        // 只有涉及我的消息才处理
+        if sender != config::MY_CALL && receiver != config::MY_CALL { return; }
+        
+        // 判定通联成功的标志：只要我方或对方发送了 RR73/RRR/73 就算成功
         let is_end = res.text.contains(" RR73") || res.text.contains(" RRR") || res.text.contains(" 73");
         if !is_end { return; }
 
-        let his_call = match res.sender_call.as_ref() { Some(c) => clean_call(c), None => return };
+        let his_call = if sender == config::MY_CALL { receiver } else { sender };
+        if his_call == "UNKNOWN" || his_call.is_empty() { return; }
         let now = Instant::now();
         if let Some(last) = self.last_logged_at.get(&his_call) {
             if now.duration_since(*last) < Duration::from_secs(600) { return; }
@@ -223,16 +229,66 @@ impl AutoQsoManager {
             time: (chrono::Utc::now() + chrono::Duration::hours(8)).format("%Y-%m-%dT%H:%M:%S+08:00").to_string(),
             freq: format!("{:.3}", freq_mhz),
             call: his_call.clone(),
-            my_snr: my_rcv_snr,
-            his_snr: his_rcv_snr,
+            my_snr: my_rcv_snr.clone(),
+            his_snr: his_rcv_snr.clone(),
             grid: grid_display,
             region: self.location_engine.get_region(&his_call),
         };
+        
+        // 同时保存 ADIF 到本地
+        Self::save_to_adif(&his_call, &his_grid.unwrap_or_default(), &my_rcv_snr, &his_rcv_snr, freq_mhz);
+
         let tx = self.notion_tx.clone();
         tokio::spawn(async move { let _ = tx.send(log).await; });
 
         self.is_dirty = true;
         self.maybe_save(true); // 通联成功后强制立即存档一次
+    }
+
+    /// 将通联记录保存为标准 ADIF 格式追加到本地文件 (使用 radif crate 确保符合 LoTW 标准)
+    fn save_to_adif(call: &str, grid: &str, rst_sent: &str, rst_rcvd: &str, freq_mhz: f64) {
+        let now = chrono::Utc::now() + chrono::Duration::hours(8);
+        let date_str = now.format("%Y%m%d").to_string();
+        let time_str = now.format("%H%M%S").to_string();
+        let band = match freq_mhz {
+            1.8..=2.0 => "160M",
+            3.5..=3.8 => "80M",
+            7.0..=7.3 => "40M",
+            10.1..=10.15 => "30M",
+            14.0..=14.35 => "20M",
+            18.068..=18.168 => "17M",
+            21.0..=21.45 => "15M",
+            24.89..=24.99 => "12M",
+            28.0..=29.7 => "10M",
+            50.0..=54.0 => "6M",
+            144.0..=148.0 => "2M",
+            _ => "OTHER",
+        };
+
+        // 使用 radif 构建符合 LoTW 要求的记录
+        let mut record = Record::new();
+        record.add_field(Field::new("CALL", call));
+        if !grid.is_empty() { record.add_field(Field::new("GRIDSQUARE", grid)); }
+        record.add_field(Field::new("MODE", "FT8"));
+        record.add_field(Field::new("RST_SENT", rst_sent));
+        record.add_field(Field::new("RST_RCVD", rst_rcvd));
+        record.add_field(Field::new("QSO_DATE", &date_str));
+        record.add_field(Field::new("TIME_ON", &time_str));
+        record.add_field(Field::new("BAND", band));
+        record.add_field(Field::new("FREQ", &format!("{:.6}", freq_mhz)));
+        record.add_field(Field::new("STATION_CALLSIGN", config::MY_CALL));
+
+        // 将 Record 转换为字符串 (radif 的 Record 默认带 <EOR>)
+        let adif_entry = format!("{} \n", record.to_string());
+
+        let log_dir = "logs";
+        if !std::path::Path::new(log_dir).exists() { let _ = fs::create_dir(log_dir); }
+        let log_path = format!("{}/wsjtx_log.adi", log_dir);
+
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+            let _ = file.write_all(adif_entry.as_bytes());
+        }
     }
     
     pub fn report_failure(&mut self) { self.consecutive_failures += 1; log_to_pc(&format!("❌ 目标未回复 (当前连续失败: {})", self.consecutive_failures)); }
