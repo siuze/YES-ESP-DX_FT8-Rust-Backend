@@ -10,6 +10,24 @@ use std::io::Write;
 use crate::config;
 use crate::ft8_qso::location::LocationEngine; 
 
+/// 根据频率获取 ADIF 标准波段名称
+fn get_band_name(freq_mhz: f64) -> &'static str {
+    match freq_mhz {
+        1.8..=2.0 => "160M",
+        3.5..=3.8 => "80M",
+        7.0..=7.3 => "40M",
+        10.1..=10.15 => "30M",
+        14.0..=14.35 => "20M",
+        18.068..=18.168 => "17M",
+        21.0..=21.45 => "15M",
+        24.89..=24.99 => "12M",
+        28.0..=29.7 => "10M",
+        50.0..=54.0 => "6M",
+        144.0..=148.0 => "2M",
+        _ => "OTHER",
+    }
+}
+
 // --- 系统局部配置 ---
 const CALL_GRID_FILE: &str = "call_to_grid.json";  // 呼号与网格的持久化映射文件
 const SUCCESSFUL_FILE: &str = "qso_success.json";  // 已成功通联的呼号列表
@@ -187,8 +205,14 @@ impl AutoQsoManager {
         }
         self.last_logged_at.insert(his_call.clone(), now);
 
-        // 成功，加入本地数据库
-        self.successful_calls.insert(his_call.clone());
+        // 成功，加入本地数据库 (采用 CALL:BAND 格式实现波段查重)
+        let freq_mhz = {
+            let lo = RADIO_LO_FREQ.load(Ordering::SeqCst);
+            let s = STATE.get().unwrap().read().unwrap();
+            (lo + (s.current_if_hz as u64)) as f64 / 1_000_000.0
+        };
+        let band = get_band_name(freq_mhz);
+        self.successful_calls.insert(format!("{}:{}", his_call, band));
         self.consecutive_failures = 0; 
 
         // 追溯历史中的 SNR 报告
@@ -284,6 +308,13 @@ impl AutoQsoManager {
         } else { None }
     }
 
+    /// 判定是否为 BnCRA 系列特设台 (B0CRA - B9CRA)
+    fn is_cra_special(call: &str) -> bool {
+        let call = call.to_uppercase();
+        if call.len() != 5 { return false; }
+        call.starts_with('B') && call.ends_with("CRA") && call.as_bytes()[1].is_ascii_digit()
+    }
+
     /// --- 自动通联核心逻辑 (Mode 3: 自动化全通联处理) ---
 
     /// 判断呼号所属区域：用于本地优先/DX (远距离) 优先策略 (中日韩印尼定义为本地)
@@ -335,24 +366,45 @@ impl AutoQsoManager {
 
         candidates.retain(|(r, _e)| {
             let call = clean_call(r.sender_call.as_ref().unwrap()); 
-            if self.successful_calls.contains(&call) || call == config::MY_CALL { return false; }
+            if call == config::MY_CALL { return false; }
+            
+            // 波段查重逻辑
+            let freq_mhz = {
+                let lo = RADIO_LO_FREQ.load(Ordering::SeqCst);
+                let s = STATE.get().unwrap().read().unwrap();
+                (lo + (s.current_if_hz as u64)) as f64 / 1_000_000.0
+            };
+            let band = get_band_name(freq_mhz);
+            let band_key = format!("{}:{}", call, band);
+            
+            // 如果该波段已通联，或者该呼号有全局通联记录 (兼容老版本)，则过滤
+            if self.successful_calls.contains(&band_key) || self.successful_calls.contains(&call) {
+                return false; 
+            }
+
             let wait_time = if !Self::is_local_area(&call) { 600 } else { 1200 };
             if let Some(t) = self.attempted_recent.get(&call) { if now.duration_since(*t) < Duration::from_secs(wait_time) { return false; } }
             true
         });
 
-        // 排序优先级：超级远距离 > 稀有地区 (DX) > 窗口一致性 (New) > CQ消息 > 新网格 > 强SNR
+        // 排序优先级：BnCRA特设台 > 超级远距离 > 稀有地区 (DX) > 窗口一致性 > CQ消息 > 新网格 > 强SNR
         candidates.sort_by(|(a, e_a), (b, e_b)| {
-            let ac = a.sender_call.as_ref().unwrap(); let bc = b.sender_call.as_ref().unwrap();
+            let ac_raw = a.sender_call.as_ref().unwrap(); let bc_raw = b.sender_call.as_ref().unwrap();
+            let ac = clean_call(ac_raw); let bc = clean_call(bc_raw);
             
+            // 0. BnCRA 特设台 (最高优先级)
+            let acra = Self::is_cra_special(&ac);
+            let bcra = Self::is_cra_special(&bc);
+            if acra != bcra { return bcra.cmp(&acra); }
+
             // 1. 超级远距离
-            let asf = self.get_distance(ac).unwrap_or(0.0) > 4000.0; 
-            let bsf = self.get_distance(bc).unwrap_or(0.0) > 4000.0;
+            let asf = self.get_distance(&ac).unwrap_or(0.0) > 4000.0; 
+            let bsf = self.get_distance(&bc).unwrap_or(0.0) > 4000.0;
             if asf != bsf { return bsf.cmp(&asf); }
             
             // 2. 稀有地区 (DX)
-            let ar = !Self::is_local_area(ac); 
-            let br = !Self::is_local_area(bc);
+            let ar = !Self::is_local_area(&ac); 
+            let br = !Self::is_local_area(&bc);
             if ar != br { return br.cmp(&ar); }
 
             // 3. 窗口一致性：尽量不变更奇偶窗口 (目标是偶数，则我们需要在奇数发送，反之亦然)
