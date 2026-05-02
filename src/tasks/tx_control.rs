@@ -45,6 +45,15 @@ pub fn spawn_tx_check_task(state: Arc<RwLock<AppState>>) {
                                 Ok(_) => {
                                     log_to_pc(&format!("🚀 [发射指令已下发] Msg: {} | Freq: {} Hz | IP: {}", pending_msg, use_f, target_ip));
                                     s.status.tx_count += 1;
+                                    
+                                    // [关键修复] 将我方发射的消息也同步到状态机历史中，以便在发完 RR73 后立即触发 Notion 记录
+                                    {
+                                        if let Some(mgr_arc) = AUTO_MGR.get() {
+                                            if let Ok(mut mgr) = mgr_arc.lock() {
+                                                mgr.push_tx_decode(&pending_msg, use_f as f32, is_even_win);
+                                            }
+                                        }
+                                    }
                                 }
                                 Err(e) => {
                                     log_to_pc(&format!("❌ [发射失败] UDP 写入错误: {}", e));

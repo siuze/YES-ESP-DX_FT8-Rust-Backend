@@ -185,6 +185,30 @@ impl AutoQsoManager {
         self.msg_history.push_back((now, res, is_even));
     }
 
+    /// 接收我方发射的消息并同步至状态池与日志判定
+    pub fn push_tx_decode(&mut self, text: &str, freq: f32, is_even: bool) {
+        let parts: Vec<&str> = text.split_whitespace().collect();
+        if parts.len() < 2 { return; }
+        
+        let receiver = clean_call(parts[0]);
+        let sender = clean_call(parts[1]);
+        
+        let res = Ft8DecodeResult {
+            text: text.to_string(),
+            snr: 99, // 特殊值标记为我方发射
+            freq,
+            dt: 0.0,
+            sender_call: Some(sender),
+            receiver_call: Some(receiver),
+            grid: parts.get(2).map(|s| s.to_string()),
+            decode_time_ms: 0,
+            region: None,
+        };
+        
+        self.push_decode(res.clone(), is_even);
+        self.check_and_log_qso(&res);
+    }
+
     /// 通联日志判定与上报逻辑 (处理 Notion 下发)
     pub fn check_and_log_qso(&mut self, res: &Ft8DecodeResult) {
         let sender = res.sender_call.as_deref().map(clean_call).unwrap_or_default();
@@ -221,11 +245,22 @@ impl AutoQsoManager {
         for (_, h, _) in self.msg_history.iter().rev() {
             let h_sender = h.sender_call.as_deref().map(clean_call).unwrap_or_default();
             let h_receiver = h.receiver_call.as_deref().map(clean_call).unwrap_or_default();
+            
             if h_sender == his_call && h_receiver == config::MY_CALL {
-                if let Some(s) = Self::extract_snr_from_text(&h.text) { if his_rcv_snr.is_empty() { his_rcv_snr = s; } }
+                // 情况 A: 对方发给我的消息。h.snr 是我接收对方的强度。
+                if my_rcv_snr.is_empty() && h.snr != 99 {
+                    my_rcv_snr = format!("{:+03}", h.snr);
+                }
+                // 如果消息文本里带报告 (如 R-10)，那是对方接收我的强度。
+                if let Some(s) = Self::extract_snr_from_text(&h.text) {
+                    if his_rcv_snr.is_empty() { his_rcv_snr = s; }
+                }
             }
             if h_sender == config::MY_CALL && h_receiver == his_call {
-                if let Some(s) = Self::extract_snr_from_text(&h.text) { if my_rcv_snr.is_empty() { my_rcv_snr = s; } }
+                // 情况 B: 我发给对方的消息。文本里带的报告是我接收对方的强度。
+                if let Some(s) = Self::extract_snr_from_text(&h.text) {
+                    if my_rcv_snr.is_empty() { my_rcv_snr = s; }
+                }
             }
             if !my_rcv_snr.is_empty() && !his_rcv_snr.is_empty() { break; }
         }
