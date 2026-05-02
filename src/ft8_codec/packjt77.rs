@@ -82,7 +82,7 @@ pub fn save_hash_call(call: &str) {
 
     // 如果是复合呼号 (如 R5AF/0)，尝试保存基准呼号 (R5AF)
     // 这样后续的 Suffix 模式编码才能通过 12-bit Hash 找回基准名字
-    if let Some(slash_pos) = call.find('/') {
+    if call.contains('/') {
         let parts: Vec<&str> = call.split('/').collect();
         // 找出最像呼号的那部分 (通常是中间那个，或者最长的那个)
         let mut base = parts[0];

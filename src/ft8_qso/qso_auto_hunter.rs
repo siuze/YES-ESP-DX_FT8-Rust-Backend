@@ -4,13 +4,11 @@ use crate::utils::log_to_pc;
 use std::collections::{VecDeque, HashMap, HashSet};
 use std::time::{Duration, Instant};
 use std::sync::atomic::Ordering;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Write;
-use chrono::{Utc, Timelike};
-use crate::ft8_qso::location::LocationEngine; 
-use radif::{Record, Field};
 
 use crate::config;
+use crate::ft8_qso::location::LocationEngine; 
 
 // --- 系统局部配置 ---
 const CALL_GRID_FILE: &str = "call_to_grid.json";  // 呼号与网格的持久化映射文件
@@ -245,49 +243,31 @@ impl AutoQsoManager {
         self.maybe_save(true); // 通联成功后强制立即存档一次
     }
 
-    /// 将通联记录保存为标准 ADIF 格式追加到本地文件 (使用 radif crate 确保符合 LoTW 标准)
+    /// 将通联记录保存为标准 ADIF 格式追加到本地文件
     fn save_to_adif(call: &str, grid: &str, rst_sent: &str, rst_rcvd: &str, freq_mhz: f64) {
         let now = chrono::Utc::now() + chrono::Duration::hours(8);
         let date_str = now.format("%Y%m%d").to_string();
         let time_str = now.format("%H%M%S").to_string();
         let band = match freq_mhz {
-            1.8..=2.0 => "160M",
-            3.5..=3.8 => "80M",
-            7.0..=7.3 => "40M",
-            10.1..=10.15 => "30M",
-            14.0..=14.35 => "20M",
-            18.068..=18.168 => "17M",
-            21.0..=21.45 => "15M",
-            24.89..=24.99 => "12M",
-            28.0..=29.7 => "10M",
-            50.0..=54.0 => "6M",
-            144.0..=148.0 => "2M",
-            _ => "OTHER",
+            1.8..=2.0 => "160M", 3.5..=3.8 => "80M", 7.0..=7.3 => "40M", 10.1..=10.15 => "30M",
+            14.0..=14.35 => "20M", 18.068..=18.168 => "17M", 21.0..=21.45 => "15M", 24.89..=24.99 => "12M",
+            28.0..=29.7 => "10M", 50.0..=54.0 => "6M", 144.0..=148.0 => "2M", _ => "OTHER",
         };
 
-        // 使用 radif 构建符合 LoTW 要求的记录
-        let mut record = Record::new();
-        record.add_field(Field::new("CALL", call));
-        if !grid.is_empty() { record.add_field(Field::new("GRIDSQUARE", grid)); }
-        record.add_field(Field::new("MODE", "FT8"));
-        record.add_field(Field::new("RST_SENT", rst_sent));
-        record.add_field(Field::new("RST_RCVD", rst_rcvd));
-        record.add_field(Field::new("QSO_DATE", &date_str));
-        record.add_field(Field::new("TIME_ON", &time_str));
-        record.add_field(Field::new("BAND", band));
-        record.add_field(Field::new("FREQ", &format!("{:.6}", freq_mhz)));
-        record.add_field(Field::new("STATION_CALLSIGN", config::MY_CALL));
-
-        // 将 Record 转换为字符串 (radif 的 Record 默认带 <EOR>)
-        let adif_entry = format!("{} \n", record.to_string());
+        let adif = format!(
+            "<CALL:{len}>{call} <GRIDSQUARE:{glen}>{grid} <MODE:3>FT8 <RST_SENT:{slen}>{rs} <RST_RCVD:{rlen}>{rr} <QSO_DATE:8>{date} <TIME_ON:6>{time} <BAND:{blen}>{band} <FREQ:{flen}>{freq:.6} <STATION_CALLSIGN:{mlen}>{my} <EOR>\n",
+            len = call.len(), call = call, glen = grid.len(), grid = grid,
+            slen = rst_sent.len(), rs = rst_sent, rlen = rst_rcvd.len(), rr = rst_rcvd,
+            date = date_str, time = time_str, blen = band.len(), band = band,
+            flen = format!("{:.6}", freq_mhz).len(), freq = freq_mhz,
+            mlen = config::MY_CALL.len(), my = config::MY_CALL
+        );
 
         let log_dir = "logs";
         if !std::path::Path::new(log_dir).exists() { let _ = fs::create_dir(log_dir); }
         let log_path = format!("{}/wsjtx_log.adi", log_dir);
-
-        use std::io::Write;
         if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
-            let _ = file.write_all(adif_entry.as_bytes());
+            let _ = file.write_all(adif.as_bytes());
         }
     }
     
@@ -295,12 +275,10 @@ impl AutoQsoManager {
     pub fn report_any_reply(&mut self) { if self.consecutive_failures > 0 { log_to_pc("✅ 收到回复，重置失败计数"); self.consecutive_failures = 0; } }
 
     /// 从 FT8 消息文本中提取 SNR 字段（格式如 "+05"、"-12"、"R-07" 等）
-    /// 返回纯数值部分 (去掉 "R" 前缀)，如 "R-07" -> "-07"
     fn extract_snr_from_text(text: &str) -> Option<String> {
         let re = regex::Regex::new(r"R?[+-]\d{1,2}$").ok()?;
         let last = text.split_whitespace().last()?;
         if re.is_match(last) {
-            // 去掉 "R" 前缀 (FT8 中 R 表示 Roger 确认，不属于 SNR 数值)
             let snr = last.strip_prefix('R').unwrap_or(last);
             Some(snr.to_string())
         } else { None }
@@ -325,12 +303,10 @@ impl AutoQsoManager {
     }
     
     /// 策略：全宽频自动追踪 (Auto Chase)
-    /// 寻找正在叫 CQ 或通联刚结束的“优质”潜在通联目标。优先级：超远距离 > 稀有 DX > 新网格 > SNR 高信号好。
     pub fn check_auto_chase(&mut self, is_idle: bool) -> Option<(String, i16, i16, bool)> {
         if !is_idle || Instant::now().duration_since(self.last_incoming_for_me) < Duration::from_secs(30) { return None; }
         let now = Instant::now();
 
-        // 获取当前发射窗口偏好
         let current_tx_even = {
             if let Some(state_arc) = STATE.get() {
                 if let Ok(s) = state_arc.read() {
