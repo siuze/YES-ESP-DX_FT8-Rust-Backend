@@ -371,8 +371,10 @@ impl AutoQsoManager {
     /// 判定是否为 BnCRA 系列特设台 (B0CRA - B9CRA)
     fn is_cra_special(call: &str) -> bool {
         let call = call.to_uppercase();
-        if call.len() != 5 { return false; }
-        call.starts_with('B') && call.ends_with("CRA") && call.as_bytes()[1].is_ascii_digit()
+        // 允许带后缀，如 B1CRA/7，先提取主呼号
+        let base_call = call.split('/').next().unwrap_or(&call);
+        if base_call.len() != 5 { return false; }
+        base_call.starts_with('B') && base_call.ends_with("CRA") && base_call.as_bytes()[1].is_ascii_digit()
     }
 
     /// --- 自动通联核心逻辑 (Mode 3: 自动化全通联处理) ---
@@ -442,8 +444,13 @@ impl AutoQsoManager {
                 return false; 
             }
 
-            let wait_time = if !Self::is_local_area(&call) { 600 } else { 1200 };
-            if let Some(t) = self.attempted_recent.get(&call) { if now.duration_since(*t) < Duration::from_secs(wait_time) { return false; } }
+            // BnCRA 特设台不设冷静期，只要没成功就可以反复呼叫
+            if !Self::is_cra_special(&call) {
+                let wait_time = if !Self::is_local_area(&call) { 600 } else { 1200 };
+                if let Some(t) = self.attempted_recent.get(&call) { 
+                    if now.duration_since(*t) < Duration::from_secs(wait_time) { return false; } 
+                }
+            }
             true
         });
 

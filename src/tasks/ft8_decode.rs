@@ -134,6 +134,18 @@ fn process_ft8_decode(samples_i16: Vec<i16>, psk_tx: tokio::sync::mpsc::Sender<P
                 // 构造一个包含翻译后文本的临时结果用于状态机
                 let mut resolved_res = res.clone();
                 resolved_res.text = resolved_text.clone();
+                
+                // [关键修复] 重新解析解析后的呼号，确保 BnCRA 等被哈希过的呼号能被识别
+                let parts: Vec<&str> = resolved_text.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    if parts[0].starts_with("CQ") || parts[0] == "QRZ" {
+                        resolved_res.sender_call = Some(parts[1].to_string());
+                        resolved_res.receiver_call = Some(parts[0].to_string());
+                    } else {
+                        resolved_res.sender_call = Some(parts[1].to_string());
+                        resolved_res.receiver_call = Some(parts[0].to_string());
+                    }
+                }
 
                 mgr.push_decode(resolved_res.clone(), window_is_even);                // 更新历史解码信息
                 mgr.check_and_log_qso(&resolved_res);                 // 检查通联是否完成
