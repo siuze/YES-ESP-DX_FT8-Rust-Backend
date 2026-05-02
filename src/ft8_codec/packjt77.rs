@@ -133,32 +133,32 @@ pub fn resolve_hashes(text: &str) -> String {
     };
     
     let mut result = text.to_string();
-    let mut offset = 0;
     
-    // 找出所有匹配项
-    let captures: Vec<(usize, usize, u32)> = re.captures_iter(text)
-        .filter_map(|cap| {
-            let m = cap.get(0)?;
-            let h_val: u32 = cap.get(1)?.as_str().parse().ok()?;
-            Some((m.start(), m.end(), h_val))
-        })
-        .collect();
-
-    for (start, end, h_val) in captures {
-        let resolved = {
-            let guard = get_cache();
-            guard.as_ref().unwrap().calls22.get(&h_val).cloned()
-                .or_else(|| guard.as_ref().unwrap().calls12.get(&h_val).cloned())
-                .or_else(|| guard.as_ref().unwrap().calls10.get(&h_val).cloned())
-        };
-
-        if let Some(call) = resolved {
-            let s = start + offset;
-            let e = end + offset;
-            result.replace_range(s..e, &call);
-            offset = offset + call.len() as i32 - (end - start) as i32;
+    // 1. 找出所有匹配项并存储
+    let mut matches: Vec<(usize, usize, String)> = Vec::new();
+    for cap in re.captures_iter(text) {
+        if let (Some(m), Some(h_str)) = (cap.get(0), cap.get(1)) {
+            if let Ok(h_val) = h_str.as_str().parse::<u32>() {
+                let resolved = {
+                    let guard = get_cache();
+                    let cache = guard.as_ref().unwrap();
+                    cache.calls22.get(&h_val).cloned()
+                        .or_else(|| cache.calls12.get(&h_val).cloned())
+                        .or_else(|| cache.calls10.get(&h_val).cloned())
+                };
+                if let Some(call) = resolved {
+                    matches.push((m.start(), m.end(), call));
+                }
+            }
         }
     }
+
+    // 2. 从后往前替换，这样前面的索引就不会因为字符串长度改变而失效
+    matches.sort_by_key(|m| std::cmp::Reverse(m.0));
+    for (start, end, call) in matches {
+        result.replace_range(start..end, &call);
+    }
+    
     result
 }
 

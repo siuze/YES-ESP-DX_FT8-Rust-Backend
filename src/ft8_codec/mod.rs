@@ -6,6 +6,7 @@ mod ldpc_gen;
 pub mod subtraction;
 
 pub use packjt77::save_hash_call;
+pub use packjt77::resolve_hashes;
 
 use std::f32::consts::PI;
 use num_complex::Complex32;
