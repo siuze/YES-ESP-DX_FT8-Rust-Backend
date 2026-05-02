@@ -12,6 +12,7 @@ pub static AUTO_MGR: OnceLock<Arc<Mutex<AutoQsoManager>>> = OnceLock::new();
 pub static STATE: OnceLock<Arc<RwLock<AppState>>> = OnceLock::new();
 pub static CURRENT_DECODE_TS: AtomicU64 = AtomicU64::new(0);
 pub static CURRENT_DT_OFFSET_MS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+pub static CURRENT_IF_HZ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(12000);
 
 // --- 常量配置 ---
 pub const SAMPLE_RATE: f32 = 48000.0;

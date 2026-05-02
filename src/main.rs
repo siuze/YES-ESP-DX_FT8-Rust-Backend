@@ -74,6 +74,7 @@ async fn main() {
         s.status.rx_gain = 10.0;
     }
     STATE.set(state.clone()).ok();
+    crate::types::CURRENT_IF_HZ.store(12000, std::sync::atomic::Ordering::SeqCst);
 
     // --- 4. 生成 16 秒音频采样滑动缓冲区 (供 FT8 算法拉取) ---
     let decode_buf = Arc::new(Mutex::new(DecodeBuffer::new()));

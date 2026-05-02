@@ -232,8 +232,8 @@ impl AutoQsoManager {
         // 成功，加入本地数据库 (采用 CALL:BAND 格式实现波段查重)
         let freq_mhz = {
             let lo = RADIO_LO_FREQ.load(Ordering::SeqCst);
-            let s = STATE.get().unwrap().read().unwrap();
-            (lo + (s.current_if_hz as u64)) as f64 / 1_000_000.0
+            let if_hz = crate::types::CURRENT_IF_HZ.load(Ordering::SeqCst);
+            (lo + (if_hz as u64)) as f64 / 1_000_000.0
         };
         let band = get_band_name(freq_mhz);
         self.successful_calls.insert(format!("{}:{}", his_call, band));
@@ -267,8 +267,8 @@ impl AutoQsoManager {
         
         let freq_mhz = {
             let lo = RADIO_LO_FREQ.load(Ordering::SeqCst);
-            let s = STATE.get().unwrap().read().unwrap();
-            (lo + (s.current_if_hz as u64)) as f64 / 1_000_000.0
+            let if_hz = crate::types::CURRENT_IF_HZ.load(Ordering::SeqCst);
+            (lo + (if_hz as u64)) as f64 / 1_000_000.0
         };
         
         let his_grid = self.call_to_grid.get(&his_call).cloned();
@@ -406,8 +406,8 @@ impl AutoQsoManager {
             // 波段查重逻辑
             let freq_mhz = {
                 let lo = RADIO_LO_FREQ.load(Ordering::SeqCst);
-                let s = STATE.get().unwrap().read().unwrap();
-                (lo + (s.current_if_hz as u64)) as f64 / 1_000_000.0
+                let if_hz = crate::types::CURRENT_IF_HZ.load(Ordering::SeqCst);
+                (lo + (if_hz as u64)) as f64 / 1_000_000.0
             };
             let band = get_band_name(freq_mhz);
             let band_key = format!("{}:{}", call, band);

@@ -18,6 +18,7 @@ pub fn spawn_tx_check_task(state: Arc<RwLock<AppState>>) {
             // 仅在窗口起始的 1 秒内尝试触发发射，防止重复发送
             if (sec == 0 || sec == 15 || sec == 30 || sec == 45) && now.timestamp_subsec_millis() < 500 {
                 let mut should_sleep = false;
+                let mut tx_to_push = None;
 
                 {
                     let mut s = state.write().unwrap();
@@ -45,15 +46,8 @@ pub fn spawn_tx_check_task(state: Arc<RwLock<AppState>>) {
                                 Ok(_) => {
                                     log_to_pc(&format!("🚀 [发射指令已下发] Msg: {} | Freq: {} Hz | IP: {}", pending_msg, use_f, target_ip));
                                     s.status.tx_count += 1;
-                                    
-                                    // [关键修复] 将我方发射的消息也同步到状态机历史中，以便在发完 RR73 后立即触发 Notion 记录
-                                    {
-                                        if let Some(mgr_arc) = AUTO_MGR.get() {
-                                            if let Ok(mut mgr) = mgr_arc.lock() {
-                                                mgr.push_tx_decode(&pending_msg, use_f as f32, is_even_win);
-                                            }
-                                        }
-                                    }
+                                    // 记录待同步到状态机的消息信息
+                                    tx_to_push = Some((pending_msg.clone(), use_f, is_even_win));
                                 }
                                 Err(e) => {
                                     log_to_pc(&format!("❌ [发射失败] UDP 写入错误: {}", e));
@@ -76,6 +70,15 @@ pub fn spawn_tx_check_task(state: Arc<RwLock<AppState>>) {
                         }
 
                         should_sleep = true;
+                    }
+                }
+
+                // [关键修复] 将 push_tx_decode 移出 AppState 写锁范围，彻底避免 AB-BA 死锁
+                if let Some((msg, f, even)) = tx_to_push {
+                    if let Some(mgr_arc) = AUTO_MGR.get() {
+                        if let Ok(mut mgr) = mgr_arc.lock() {
+                            mgr.push_tx_decode(&msg, f as f32, even);
+                        }
                     }
                 }
 
@@ -155,7 +158,7 @@ pub fn spawn_auto_qso_timer_task() {
 
                 // 核心逻辑 B: 在每 15 秒周期的结尾 (14, 29, 44, 59s) 检查是否需要发起新的自动策略
                 if (sec == 14 || sec == 29 || sec == 44 || sec == 59) && ms >= 900 {
-                    let current_is_idle = STATE.get().unwrap().read().unwrap().status.pending_msg[0] == 0;
+                    let current_is_idle = is_idle; // 直接使用本轮循环开始时获取的状态，避免重复加锁导致死锁
                     
                     let mut triggered = false;
 

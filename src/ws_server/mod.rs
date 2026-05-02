@@ -98,7 +98,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<RwLock<AppState>>) {
                             }
                         }
                         3 => {
-                            s.current_if_hz = u16::from_le_bytes([bin[2], bin[3]]) as u32;
+                            let val = u16::from_le_bytes([bin[2], bin[3]]) as u32;
+                            s.current_if_hz = val;
+                            crate::types::CURRENT_IF_HZ.store(val, std::sync::atomic::Ordering::SeqCst);
                         }
                         4 => {
                             s.status.max_repeats = bin[2];
