@@ -190,9 +190,17 @@ impl AutoQsoManager {
         let parts: Vec<&str> = text.split_whitespace().collect();
         if parts.len() < 2 { return; }
         
-        let receiver = clean_call(parts[0]);
-        let sender = clean_call(parts[1]);
-        
+        // 智能识别发送者与接收者 (适配 [Source] [Target] 或 [Target] [Source])
+        let c0 = clean_call(parts[0]);
+        let c1 = clean_call(parts[1]);
+        let (sender, receiver) = if c0 == config::MY_CALL {
+            (c0, c1)
+        } else if c1 == config::MY_CALL {
+            (c1, c0)
+        } else {
+            (c1, c0) // 默认假设 Call2 是发送者
+        };
+
         let res = Ft8DecodeResult {
             text: text.to_string(),
             snr: 99, // 特殊值标记为我方发射
@@ -228,6 +236,7 @@ impl AutoQsoManager {
             if now.duration_since(*last) < Duration::from_secs(600) { return; }
         }
         self.last_logged_at.insert(his_call.clone(), now);
+        log_to_pc(&format!("🎊 通联完成！准备上报日志: {}", his_call));
 
         // 成功，加入本地数据库 (采用 CALL:BAND 格式实现波段查重)
         let freq_mhz = {
@@ -240,30 +249,44 @@ impl AutoQsoManager {
         self.consecutive_failures = 0; 
 
         // 追溯历史中的 SNR 报告
-        let mut my_rcv_snr = String::new();
-        let mut his_rcv_snr = String::new();
+        let mut my_rcv_snr_text = String::new();
+        let mut his_rcv_snr_text = String::new();
+        let mut my_rcv_snr_pkt = String::new();
+
         for (_, h, _) in self.msg_history.iter().rev() {
             let h_sender = h.sender_call.as_deref().map(clean_call).unwrap_or_default();
             let h_receiver = h.receiver_call.as_deref().map(clean_call).unwrap_or_default();
             
-            if h_sender == his_call && h_receiver == config::MY_CALL {
-                // 情况 A: 对方发给我的消息。h.snr 是我接收对方的强度。
-                if my_rcv_snr.is_empty() && h.snr != 99 {
-                    my_rcv_snr = format!("{:+03}", h.snr);
-                }
-                // 如果消息文本里带报告 (如 R-10)，那是对方接收我的强度。
+            // 只要消息涉及我和对方，就尝试提取报告
+            let is_from_him = h_sender == his_call && h_receiver == config::MY_CALL;
+            let is_to_him = h_sender == config::MY_CALL && h_receiver == his_call;
+
+            if is_from_him {
+                // 对方发给我的消息：
+                // 1. 提取消息文本中的报告 (如 -09)，那是他接收我的强度
                 if let Some(s) = Self::extract_snr_from_text(&h.text) {
-                    if his_rcv_snr.is_empty() { his_rcv_snr = s; }
+                    if his_rcv_snr_text.is_empty() { his_rcv_snr_text = s; }
+                }
+                // 2. 提取该数据包本身的 SNR，那是我接收他的瞬时强度
+                if my_rcv_snr_pkt.is_empty() && h.snr != 99 {
+                    my_rcv_snr_pkt = format!("{:+03}", h.snr);
                 }
             }
-            if h_sender == config::MY_CALL && h_receiver == his_call {
-                // 情况 B: 我发给对方的消息。文本里带的报告是我接收对方的强度。
+            if is_to_him {
+                // 我发给对方的消息：
+                // 1. 提取消息文本中的报告 (如 R-14)，那是我接收他的强度
                 if let Some(s) = Self::extract_snr_from_text(&h.text) {
-                    if my_rcv_snr.is_empty() { my_rcv_snr = s; }
+                    if my_rcv_snr_text.is_empty() { my_rcv_snr_text = s; }
                 }
             }
-            if !my_rcv_snr.is_empty() && !his_rcv_snr.is_empty() { break; }
+            
+            // 如果三个关键指标都找到了，可以提前结束
+            if !my_rcv_snr_text.is_empty() && !his_rcv_snr_text.is_empty() && !my_rcv_snr_pkt.is_empty() { break; }
         }
+        
+        // 最终汇总：收信强度优先使用文本报告，若无则使用瞬时包强度
+        let my_rcv_snr = if !my_rcv_snr_text.is_empty() { my_rcv_snr_text } else { my_rcv_snr_pkt };
+        let his_rcv_snr = his_rcv_snr_text;
         
         let freq_mhz = {
             let lo = RADIO_LO_FREQ.load(Ordering::SeqCst);
@@ -326,7 +349,9 @@ impl AutoQsoManager {
         if !std::path::Path::new(log_dir).exists() { let _ = fs::create_dir(log_dir); }
         let log_path = format!("{}/wsjtx_log.adi", log_dir);
         if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
-            let _ = file.write_all(adif.as_bytes());
+            if file.write_all(adif.as_bytes()).is_ok() {
+                log_to_pc(&format!("📝 已同步至本地 ADIF: {}", log_path));
+            }
         }
     }
     
