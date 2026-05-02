@@ -76,12 +76,15 @@ fn process_ft8_decode(samples_i16: Vec<i16>, psk_tx: tokio::sync::mpsc::Sender<P
             // 保存呼号哈希用于后续解析
             for word in res.text.split_whitespace() { crate::ft8_codec::save_hash_call(word); }
             
+            // [核心修复] 全自动哈希反查：把 <...1234> 替换回真实呼号
+            let resolved_text = crate::ft8_codec::resolve_hashes(&res.text);
+
             // 修正 DT (基于我们计算的偏移)
             let corrected_dt = res.dt + offset_s;
 
             // 构造 WebSocket 发送格式的数据包
             let mut msg_bytes = [0u8; 32];
-            let bytes = res.text.as_bytes();
+            let bytes = resolved_text.as_bytes();
             let len = bytes.len().min(32);
             msg_bytes[..len].copy_from_slice(&bytes[..len]);
 
@@ -104,7 +107,7 @@ fn process_ft8_decode(samples_i16: Vec<i16>, psk_tx: tokio::sync::mpsc::Sender<P
             // 控制台打印实时解码日志
             println!(
                 "[{:02}:{:02}:{:02}] Freq: {:4} Hz | SNR: {:+3} | DT: {:+4.1} | Msg: {} ({}ms)",
-                p_hour, p_min, p_sec, p_freq, p_snr, corrected_dt, res.text, res.decode_time_ms
+                p_hour, p_min, p_sec, p_freq, p_snr, corrected_dt, resolved_text, res.decode_time_ms
             );
 
             // --- A. 通过 WebSocket 广播解码结果到所有在线客户端 ---
@@ -116,21 +119,26 @@ fn process_ft8_decode(samples_i16: Vec<i16>, psk_tx: tokio::sync::mpsc::Sender<P
             }
 
             // --- B. 执行自动答复逻辑 (针对 Mode 2: 手动选择目标后的自动通联) ---
-            handle_auto_reply_logic(&res.text, res.snr, res.freq, p_sec);
+            handle_auto_reply_logic(&resolved_text, res.snr, res.freq, p_sec);
 
             // --- B.1 记录涉及我呼号的解码消息至日志文件 ---
-            if res.text.contains(config::MY_CALL) {
-                crate::utils::log_qso_activity(false, &res.text);
+            if resolved_text.contains(config::MY_CALL) {
+                crate::utils::log_qso_activity(false, &resolved_text);
             }
 
             // --- C. 进入 AutoQsoManager 状态机处理 (针对 Mode 3: 自动化全通联处理) ---
             {
                 let mut mgr = AUTO_MGR.get().unwrap().lock().unwrap();
                 let window_is_even = (p_sec % 30) == 0;
-                mgr.push_decode(res.clone(), window_is_even);                // 更新历史解码信息
-                mgr.check_and_log_qso(&res);                 // 检查通联是否完成
-                mgr.handle_auto_qso_logic(&res.text, res.snr, res.freq, p_sec); // [核心修复] 处理模式 3 下针对我的回复
-                if res.text.contains(config::MY_CALL) { mgr.report_any_reply(); } // 用于防止误触发紧急 CQ
+                
+                // 构造一个包含翻译后文本的临时结果用于状态机
+                let mut resolved_res = res.clone();
+                resolved_res.text = resolved_text.clone();
+
+                mgr.push_decode(resolved_res.clone(), window_is_even);                // 更新历史解码信息
+                mgr.check_and_log_qso(&resolved_res);                 // 检查通联是否完成
+                mgr.handle_auto_qso_logic(&resolved_text, res.snr, res.freq, p_sec); // [核心修复] 处理模式 3 下针对我的回复
+                if resolved_text.contains(config::MY_CALL) { mgr.report_any_reply(); } // 用于防止误触发紧急 CQ
             }
 
             // --- D. 若设置了网格，则上报至 PSK Reporter 服务 ---

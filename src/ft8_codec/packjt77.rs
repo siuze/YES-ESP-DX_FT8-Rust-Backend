@@ -120,9 +120,46 @@ fn lookup_hash12(h12: u32) -> String {
     guard.as_ref().unwrap().calls12.get(&h12).cloned().map(|c| format!("<{}>", c)).unwrap_or_else(|| format!("<...{}>", h12))
 }
 
-fn lookup_hash22(h22: u32) -> String {
+pub fn lookup_hash22(h22: u32) -> String {
     let guard = get_cache();
-    guard.as_ref().unwrap().calls22.get(&h22).cloned().map(|c| format!("<{}>", c)).unwrap_or_else(|| format!("<...{}>", h22))
+    guard.as_ref().unwrap().calls22.get(&h22).cloned().unwrap_or_else(|| format!("<...{}>", h22))
+}
+
+/// 全自动哈希翻译：扫描文本中的 <...123> 格式，尝试替换为真实呼号
+pub fn resolve_hashes(text: &str) -> String {
+    let re = match regex::Regex::new(r"<(?:\.\.\.)?(\d+)>") {
+        Ok(r) => r,
+        Err(_) => return text.to_string(),
+    };
+    
+    let mut result = text.to_string();
+    let mut offset = 0;
+    
+    // 找出所有匹配项
+    let captures: Vec<(usize, usize, u32)> = re.captures_iter(text)
+        .filter_map(|cap| {
+            let m = cap.get(0)?;
+            let h_val: u32 = cap.get(1)?.as_str().parse().ok()?;
+            Some((m.start(), m.end(), h_val))
+        })
+        .collect();
+
+    for (start, end, h_val) in captures {
+        let resolved = {
+            let guard = get_cache();
+            guard.as_ref().unwrap().calls22.get(&h_val).cloned()
+                .or_else(|| guard.as_ref().unwrap().calls12.get(&h_val).cloned())
+                .or_else(|| guard.as_ref().unwrap().calls10.get(&h_val).cloned())
+        };
+
+        if let Some(call) = resolved {
+            let s = start + offset;
+            let e = end + offset;
+            result.replace_range(s..e, &call);
+            offset = offset + call.len() as i32 - (end - start) as i32;
+        }
+    }
+    result
 }
 
 // --- 解包逻辑 ---
