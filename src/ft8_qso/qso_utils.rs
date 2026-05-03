@@ -127,16 +127,44 @@ pub fn get_sender_call(text: &str) -> Option<String> {
     if parts.len() < 2 { return None; }
     
     let to = parts[0].replace(['>', '<'], "");
-    if to == "CQ" {
+    if to == "CQ" || to == "QRZ" || to == "DE" {
+        // CQ [INDICATOR] CALL [GRID]
         if parts.len() >= 3 {
-             let caller = parts[2].replace(['>', '<'], "");
-             if caller.len() >= 3 { return Some(caller); }
-             let caller2 = parts[1].replace(['>', '<'], "");
-             if caller2.len() >= 3 { return Some(caller2); }
+             let p1 = parts[1].replace(['>', '<'], "");
+             // 检查 p1 是否为常用指示符 (DX, NA, AS 等)
+             let indicators = ["DX", "NA", "AS", "EU", "OC", "AF", "SA", "P", "M", "MM", "DE"];
+             if indicators.contains(&p1.to_uppercase().as_str()) && parts.len() >= 4 {
+                 let caller = parts[2].replace(['>', '<'], "");
+                 if !is_grid(&caller) { return Some(caller); }
+             }
+             
+             // 如果 p1 不是指示符且不是网格，则它就是发送者
+             if !is_grid(&p1) && p1.len() >= 3 {
+                 return Some(p1);
+             }
+
+             // 如果 p1 是网格或太短，尝试检查 p2
+             let p2 = parts[2].replace(['>', '<'], "");
+             if !is_grid(&p2) && p2.len() >= 3 {
+                 return Some(p2);
+             }
         }
+        // 保底处理
+        let p1 = parts[1].replace(['>', '<'], "");
+        if !is_grid(&p1) { return Some(p1); }
     } else {
-        let caller = parts[1].replace(['>', '<'], "");
-        if caller.len() >= 3 { return Some(caller); }
+        // [TARGET] [SENDER] [PAYLOAD]
+        let sender = parts[1].replace(['>', '<'], "");
+        if !is_grid(&sender) {
+            return Some(sender);
+        }
     }
     None
+}
+
+/// 提取消息中的接收方呼号 (或 CQ 标志)
+pub fn get_receiver_call(text: &str) -> Option<String> {
+    let parts: Vec<&str> = text.split_whitespace().collect();
+    if parts.is_empty() { return None; }
+    Some(parts[0].replace(['>', '<'], ""))
 }
