@@ -397,8 +397,17 @@ impl AutoQsoManager {
     
     /// 策略：全宽频自动追踪 (Auto Chase)
     pub fn check_auto_chase(&mut self, is_idle: bool) -> Option<(String, i16, i16, bool)> {
-        if !is_idle || Instant::now().duration_since(self.last_incoming_for_me) < Duration::from_secs(30) { return None; }
         let now = Instant::now();
+        // 只有当最近没有收到针对我的消息时，才考虑扫描 BnCRA 或主动追逐 (Chase)
+        if now.duration_since(self.last_incoming_for_me) < Duration::from_secs(30) { return None; }
+
+        let current_pending = {
+            if let Some(state_arc) = STATE.get() {
+                if let Ok(s) = state_arc.read() {
+                    String::from_utf8_lossy(&s.status.pending_msg).trim_matches(char::from(0)).to_string().to_uppercase()
+                } else { String::new() }
+            } else { String::new() }
+        };
 
         let current_tx_even = {
             if let Some(state_arc) = STATE.get() {
@@ -444,12 +453,16 @@ impl AutoQsoManager {
                 return false; 
             }
 
-            // BnCRA 特设台不设冷静期，只要没成功就可以反复呼叫
-            if !Self::is_cra_special(&call) {
-                let wait_time = if !Self::is_local_area(&call) { 600 } else { 1200 };
-                if let Some(t) = self.attempted_recent.get(&call) { 
-                    if now.duration_since(*t) < Duration::from_secs(wait_time) { return false; } 
-                }
+            // 冷静期设置
+            let wait_time = if Self::is_cra_special(&call) {
+                180 // BnCRA 特设台冷静期设置为 3 分钟
+            } else if !Self::is_local_area(&call) {
+                600
+            } else {
+                1200
+            };
+            if let Some(t) = self.attempted_recent.get(&call) { 
+                if now.duration_since(*t) < Duration::from_secs(wait_time) { return false; } 
             }
             true
         });
@@ -494,9 +507,34 @@ impl AutoQsoManager {
             b.snr.cmp(&a.snr)
         });
 
-        if let Some((target, e)) = candidates.first() {
+        // 特殊逻辑：发现多个 BnCRA 时，全部加入待处理队列 (排除掉当前正在通联的和即将返回的)
+        let best_candidate = candidates.first().cloned();
+        for (target, e) in candidates.iter() {
+            let call = clean_call(target.sender_call.as_ref().unwrap());
+            if Self::is_cra_special(&call) {
+                let call_up = call.to_uppercase();
+                let already_queued = self.task_queue.iter().any(|(m, _, _, _)| m.contains(&call_up));
+                let is_active = current_pending.contains(&call_up);
+                let is_best = if let Some((ref b, _)) = best_candidate {
+                    clean_call(b.sender_call.as_ref().unwrap()).to_uppercase() == call_up
+                } else { false };
+
+                // 如果既不是当前正在呼叫的，也不是本次即将返回的 (或是非 idle 模式下的所有 CRA)，则入队
+                if !already_queued && !is_active && (!is_best || !is_idle) {
+                    let tx_even = !*e;
+                    let quiet_f = self.find_quiet_freq(tx_even);
+                    let msg = format!("{} {} {}", call_up, config::MY_CALL, config::MY_GRID);
+                    log_to_pc(&format!("➕ 发现多个 BnCRA，加入待处理队列: {}", call_up));
+                    self.task_queue.push_back((msg, quiet_f, target.freq as i16, tx_even));
+                }
+            }
+        }
+
+        if !is_idle { return None; }
+
+        if let Some((target, e)) = best_candidate {
             let call = target.sender_call.as_ref().unwrap();
-            let tx_even = !*e;
+            let tx_even = !e;
             if now.duration_since(if tx_even { self.last_update_even } else { self.last_update_odd }) > Duration::from_secs(120) {
                 crate::utils::log_to_pc(&format!("⚠️ 目标窗口噪声过旧，等待更新...")); return None;
             }
