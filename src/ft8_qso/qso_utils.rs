@@ -127,35 +127,68 @@ pub fn get_sender_call(text: &str) -> Option<String> {
     if parts.len() < 2 { return None; }
     
     let to = parts[0].replace(['>', '<'], "");
+    // 扩展指示符列表，包含更多常见的区域性 CQ 修饰符
+    let indicators = [
+        "DX", "NA", "AS", "EU", "OC", "AF", "SA", 
+        "USA", "CAN", "K", "JA", "VK", "RU", "CN", 
+        "TEST", "IOTA", "SOTA", "POTA", "QRP", "QRS",
+        "P", "M", "MM", "AM", "DE", "QRZ"
+    ];
+
     if to == "CQ" || to == "QRZ" || to == "DE" {
-        // CQ [INDICATOR] CALL [GRID]
-        if parts.len() >= 3 {
+        // 处理 CQ [INDICATOR] CALL [GRID] 或 CQ CALL [GRID] [EXTRA]
+        if parts.len() >= 4 {
+            let p1 = parts[1].replace(['>', '<'], "");
+            let p2 = parts[2].replace(['>', '<'], "");
+            let p3 = parts[3].replace(['>', '<'], "");
+
+            // 1. 如果 p1 是已知指示符，则 p2 是呼号
+            if indicators.contains(&p1.to_uppercase().as_str()) {
+                return Some(p2);
+            }
+            
+            // 2. 如果 p2 是网格，则 p1 是呼号 (格式: CQ CALL GRID EXTRA)
+            if is_grid(&p2) {
+                return Some(p1);
+            }
+
+            // 3. 如果 p1 无数字且长度较短，很可能是未在列表中的指示符
+            if p1.len() <= 3 && !p1.chars().any(|c| c.is_ascii_digit()) {
+                return Some(p2);
+            }
+
+            // 4. 默认假设 p1 是呼号
+            return Some(p1);
+        } else if parts.len() == 3 {
              let p1 = parts[1].replace(['>', '<'], "");
-             // 检查 p1 是否为常用指示符 (DX, NA, AS 等)
-             let indicators = ["DX", "NA", "AS", "EU", "OC", "AF", "SA", "P", "M", "MM", "DE"];
-             if indicators.contains(&p1.to_uppercase().as_str()) && parts.len() >= 4 {
-                 let caller = parts[2].replace(['>', '<'], "");
-                 if !is_grid(&caller) { return Some(caller); }
+             let p2 = parts[2].replace(['>', '<'], "");
+             
+             // 如果 p1 是指示符，则 p2 是呼号 (格式: CQ DX CALL)
+             if indicators.contains(&p1.to_uppercase().as_str()) {
+                 return Some(p2);
              }
              
-             // 如果 p1 不是指示符且不是网格，则它就是发送者
-             if !is_grid(&p1) && p1.len() >= 3 {
+             // 如果 p2 是网格，则 p1 是呼号 (格式: CQ CALL GRID)
+             if is_grid(&p2) {
                  return Some(p1);
              }
 
-             // 如果 p1 是网格或太短，尝试检查 p2
-             let p2 = parts[2].replace(['>', '<'], "");
-             if !is_grid(&p2) && p2.len() >= 3 {
+             // 如果 p1 是网格而 p2 不是，则 p2 是呼号 (非法格式但兼容)
+             if is_grid(&p1) && !is_grid(&p2) {
                  return Some(p2);
              }
+
+             return Some(p1);
         }
-        // 保底处理
+        // 保底处理 (针对 CQ CALL 等短消息)
         let p1 = parts[1].replace(['>', '<'], "");
-        if !is_grid(&p1) { return Some(p1); }
+        if !is_grid(&p1) && !indicators.contains(&p1.to_uppercase().as_str()) && p1.len() >= 3 { 
+            return Some(p1); 
+        }
     } else {
-        // [TARGET] [SENDER] [PAYLOAD]
+        // 标准格式: [TARGET] [SENDER] [PAYLOAD]
         let sender = parts[1].replace(['>', '<'], "");
-        if !is_grid(&sender) {
+        if !is_grid(&sender) && !indicators.contains(&sender.to_uppercase().as_str()) && sender.len() >= 3 {
             return Some(sender);
         }
     }

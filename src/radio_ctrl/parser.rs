@@ -49,6 +49,52 @@ pub fn parse_radio_packet(data: &[u8]) {
             let pa_current      = r_u16(p, 61);
             let swr             = r_u16(p, 67);
 
+            // --- 异常重启检测 (持续自动通联模式下) ---
+            use std::sync::atomic::AtomicU8;
+            static LAST_LO: AtomicU64 = AtomicU64::new(0);
+            static LAST_BPF: AtomicU8 = AtomicU8::new(0xFF);
+            static LAST_LPF: AtomicU8 = AtomicU8::new(0xFF);
+            
+            let last_lo = LAST_LO.load(Ordering::Relaxed);
+            let last_bpf = LAST_BPF.load(Ordering::Relaxed);
+            let last_lpf = LAST_LPF.load(Ordering::Relaxed);
+            
+            if last_lo != 0 && last_bpf != 0xFF && last_lpf != 0xFF {
+                if lo_freq != last_lo || bpf_select != last_bpf || lpf_select != last_lpf {
+                    if let Some(state_arc) = crate::types::STATE.get() {
+                        let mut s = state_arc.write().unwrap();
+                        if s.status.auto_tx_mode == 3 {
+                            s.status.auto_tx_mode = 0; // 退出持续自动通联模式
+                            let msg = "🛑 异常重启检测：电台频段或滤波器发生改变，已自动退出持续通联模式 (Mode 3)！";
+                            crate::utils::log_to_pc(msg);
+                            
+                            // 打印改次重启和最近的 50 行日志到 ERROR_LOG.txt
+                            let mut error_log = String::new();
+                            let time_str = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                            error_log.push_str(&format!("========== ERROR LOG [{}] ==========\n", time_str));
+                            error_log.push_str(&format!("Reason: {}\n", msg));
+                            error_log.push_str(&format!("Previous State: LO={} BPF={} LPF={}\n", last_lo, last_bpf, last_lpf));
+                            error_log.push_str(&format!("Current State : LO={} BPF={} LPF={}\n", lo_freq, bpf_select, lpf_select));
+                            error_log.push_str("Recent 50 logs:\n");
+                            for log in crate::utils::get_recent_logs() {
+                                error_log.push_str(&log);
+                                error_log.push('\n');
+                            }
+                            error_log.push_str("==============================================\n");
+                            
+                            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("ERROR_LOG.txt") {
+                                use std::io::Write;
+                                let _ = file.write_all(error_log.as_bytes());
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if lo_freq > 0 { LAST_LO.store(lo_freq, Ordering::Relaxed); }
+            LAST_BPF.store(bpf_select, Ordering::Relaxed);
+            LAST_LPF.store(lpf_select, Ordering::Relaxed);
+
             // --- 更新全局 LO 频率 (每包都更新，不受节流) ---
             if lo_freq > 0 {
                 RADIO_LO_FREQ.store(lo_freq / 100, Ordering::SeqCst);
